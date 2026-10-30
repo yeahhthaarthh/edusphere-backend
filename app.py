@@ -848,3 +848,29 @@ async def sample_discovery_test(request: Request):
             "success": False,
             "error": str(e)
         }
+@app.get("/api/admin/sample-discovery-test")
+async def sample_discovery_test(request: Request):
+    require_admin(request)
+
+    try:
+        papers = discover_sample_papers()
+        return {
+            "success": True,
+            "total_found": len(papers),
+            "sample": papers[:10]
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/admin/sample-papers-sync")
+async def sample_papers_sync(request: Request):
+    require_admin(request)
+
+    try:
+        return sync_sample_papers()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Sample paper sync failed: {str(e)}"
+        )
