@@ -5,6 +5,7 @@ import uuid
 import hashlib
 import hmac
 import secrets
+from cbse_discovery import discover_cbse_papers
 from pathlib import Path
 from typing import Optional
 
@@ -765,3 +766,21 @@ async def http_error(request: Request, exc: HTTPException):
             "detail": exc.detail,
         },
     )
+@app.get("/api/admin/cbse-discovery-test")
+async def cbse_discovery_test(request: Request):
+    require_admin(request)
+
+    try:
+        papers = discover_cbse_papers()
+
+        return {
+            "success": True,
+            "total_found": len(papers),
+            "sample": papers[:5]
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
