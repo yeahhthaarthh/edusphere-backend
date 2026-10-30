@@ -607,28 +607,36 @@ def list_mock_tests(
 
 
 # ---------- Admin paper management ----------
+
 @app.post("/api/admin/papers")
 @app.post("/api/admin/papers/")
-async def create_paper(request: Request):
+async def create_paper(
+    request: Request,
+    exam: str = Form(...),
+    year: str = Form(...),
+    subject: str = Form(...),
+    session: str = Form(""),
+    title: str = Form(""),
+    description: str = Form(""),
+    sourceUrl: str = Form(""),
+    file: UploadFile | None = File(None),
+):
     require_admin(request)
 
-    form = await request.form()
-
     fields = parse_paper_fields(
-        form.get("exam"),
-        form.get("year"),
-        form.get("subject"),
-        form.get("session"),
-        form.get("title"),
-        form.get("description"),
-        form.get("sourceUrl"),
+        exam,
+        year,
+        subject,
+        session,
+        title,
+        description,
+        sourceUrl,
     )
 
     filename, stored, size = "", "", 0
-    upload = form.get("file")
 
-    if upload and getattr(upload, "filename", ""):
-        filename, stored, size = save_pdf(upload)
+    if file and file.filename:
+        filename, stored, size = save_pdf(file)
     elif fields[6]:
         stored = "EXTERNAL_URL"
 
@@ -647,7 +655,6 @@ async def create_paper(request: Request):
         result = get_paper(db, row["id"])
 
     return result
-
 
 @app.put("/api/admin/papers/{paper_id}")
 @app.put("/api/admin/papers/{paper_id}/")
