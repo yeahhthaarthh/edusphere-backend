@@ -41,7 +41,10 @@ def discover_pdf_links(page_url):
     return papers
 
 
+
 def discover_cbse_papers():
+    import re
+
     archive_url = urljoin(
         CBSE_BASE_URL,
         "cbsenew/question-paper.html"
@@ -60,13 +63,41 @@ def discover_cbse_papers():
         ):
             continue
 
-        title = link.get_text(" ", strip=True)
+        match = re.search(
+            r"/(\d{4})/(XII|X)/([^/]+)\.pdf$",
+            parsed.path,
+            re.IGNORECASE
+        )
+
+        if not match:
+            continue
+
+        year = match.group(1)
+        class_code = match.group(2).upper()
+        filename = match.group(3)
+
+        class_name = "12" if class_code == "XII" else "10"
+
+        subject_part = re.sub(
+            r"^\d+_",
+            "",
+            filename
+        )
+
+        subject = subject_part.replace("_", " ").strip()
 
         papers.append({
             "exam": "CBSE",
-            "title": title,
+            "class_name": class_name,
+            "year": year,
+            "subject": subject,
+            "subject_code": filename.split("_")[0]
+                if "_" in filename else "",
+            "session": "Unclassified",
+            "title": f"CBSE Class {class_name} {subject} {year}",
             "pdf_url": pdf_url,
             "source_url": archive_url
         })
 
     return papers
+
