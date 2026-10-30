@@ -2,28 +2,33 @@ import os, sqlite3, secrets, hashlib, hmac, time, re
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, Request, Response, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_DIR / "data"))
 PDF_DIR = DATA_DIR / "papers"
 DB_PATH = DATA_DIR / "archive.sqlite3"
+SEED_SQL_PATH = APP_DIR / "seed_data.sql"
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 SESSION_COOKIE = "archive_session"
 SESSION_TTL = 60 * 60 * 24 * 7
 MAX_PDF_BYTES = 20 * 1024 * 1024
-SECRET_KEY = os.getenv("SECRET_KEY", "")
-if not SECRET_KEY:
-    # Set SECRET_KEY in production; this fallback is only for local development.
-    SECRET_KEY = secrets.token_urlsafe(48)
+SECRET_KEY = os.getenv("SECRET_KEY", "") or secrets.token_urlsafe(48)
 
-app = FastAPI(title="Question Paper Archive API", version="1.0.0")
+app = FastAPI(title="EduSphere Question Paper Archive API", version="1.0.0")
+
+# Allow CORS for Netlify frontend and local testing
+cors_origins_env = os.getenv("CORS_ORIGINS", "https://souray.netlify.app,http://localhost:3000,http://127.0.0.1:3000")
+allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","),
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
@@ -81,13 +86,22 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_papers_exam_year ON papers(exam, year DESC);
         """)
-        email = os.getenv("ADMIN_EMAIL", "").strip().lower()
-        password = os.getenv("ADMIN_PASSWORD", "")
+        
+        # 1. Create Default Admin Account
+        email = os.getenv("ADMIN_EMAIL", "admin@edusphere.com").strip().lower()
+        password = os.getenv("ADMIN_PASSWORD", "admin12345")
         if email and password and not db.execute("SELECT id FROM admins WHERE email=?", (email,)).fetchone():
             db.execute(
                 "INSERT INTO admins(email,password_hash,is_admin,created_at) VALUES(?,?,1,?)",
                 (email, hash_password(password), int(time.time()))
             )
+
+        # 2. Automatically Seed Official SQL Data if 'papers' table is empty
+        paper_count = db.execute("SELECT COUNT(*) as cnt FROM papers").fetchone()["cnt"]
+        if paper_count == 0 and SEED_SQL_PATH.exists():
+            sql_script = SEED_SQL_PATH.read_text(encoding="utf-8")
+            db.executescript(sql_script)
+            print("Successfully seeded SQLite database with official CBSE, ICSE, NCERT & NTA papers!")
 
 init_db()
 
@@ -120,7 +134,7 @@ def require_admin(request: Request):
 
 def paper_dict(row):
     item = dict(row)
-    item["hasFile"] = bool(item.get("stored_name"))
+    item["hasFile"] = bool(item.get("stored_name") or item.get("source_url"))
     item["sourceUrl"] = item.pop("source_url", "")
     item["fileSize"] = item.pop("file_size", 0)
     item["fileName"] = item.pop("file_name", "")
@@ -164,6 +178,23 @@ def save_pdf(upload: UploadFile):
     (PDF_DIR / stored).write_bytes(data)
     return filename, stored, len(data)
 
+@app.get("/")
+def root_status():
+    with connect() as db:
+        count = db.execute("SELECT COUNT(*) as n FROM papers").fetchone()["n"]
+    return {
+        "ok": True,
+        "service": "EduSphere Python + SQL Backend is Running!",
+        "papers_in_sql_database": count,
+        "test_links": {
+            "health": "/api/health",
+            "all_papers": "/api/papers",
+            "exam_stats": "/api/stats",
+            "mock_tests": "/api/mock-tests",
+            "interactive_docs": "/docs"
+        }
+    }
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "service": "question-paper-archive"}
@@ -186,8 +217,11 @@ async def login(request: Request, response: Response):
         expires = int(time.time()) + SESSION_TTL
         db.execute("INSERT INTO sessions(token_hash,admin_id,expires_at) VALUES(?,?,?)",
                    (token_hash(token), row["id"], expires))
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
-                        samesite="lax", max_age=SESSION_TTL, path="/")
+    secure_cookie = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, secure=secure_cookie,
+        samesite="none" if secure_cookie else "lax", max_age=SESSION_TTL, path="/"
+    )
     return {"session": {"email": row["email"], "isAdmin": bool(row["is_admin"])}}
 
 @app.post("/api/auth/logout")
@@ -201,23 +235,36 @@ def logout(request: Request, response: Response):
 
 @app.post("/api/auth/forgot-password")
 async def forgot_password(request: Request):
-    # Do not reveal whether an account exists. Configure an email provider before enabling resets.
     body = await request.json()
     email = clean_email(str(body.get("email", "")))
     return {"ok": True, "message": "If an account exists, password reset instructions can be sent."}
 
 @app.get("/api/papers")
-def list_papers(exam: Optional[str] = None, q: Optional[str] = None, limit: int = 200, offset: int = 0):
+def list_papers(
+    exam: Optional[str] = None,
+    year: Optional[int] = None,
+    subject: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0
+):
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
     sql = "SELECT * FROM papers WHERE 1=1"
     args = []
     if exam:
-        sql += " AND exam=?"; args.append(exam)
+        sql += " AND exam=?"
+        args.append(exam)
+    if year:
+        sql += " AND year=?"
+        args.append(year)
+    if subject:
+        sql += " AND subject=?"
+        args.append(subject)
     if q:
         like = f"%{q.strip()}%"
-        sql += " AND (title LIKE ? OR subject LIKE ? OR CAST(year AS TEXT) LIKE ?)"
-        args.extend([like, like, like])
+        sql += " AND (title LIKE ? OR subject LIKE ? OR session LIKE ? OR CAST(year AS TEXT) LIKE ?)"
+        args.extend([like, like, like, like])
     sql += " ORDER BY year DESC, id DESC LIMIT ? OFFSET ?"
     args.extend([limit, offset])
     with connect() as db:
@@ -234,36 +281,59 @@ def read_paper(paper_id: int):
 @app.get("/api/papers/{paper_id}/file")
 def paper_file(paper_id: int, request: Request, download: int = 0):
     with connect() as db:
-        row = db.execute("SELECT stored_name,file_name FROM papers WHERE id=?", (paper_id,)).fetchone()
-        if not row or not row["stored_name"]:
-            raise HTTPException(404, "PDF not found")
+        row = db.execute("SELECT stored_name, file_name, source_url FROM papers WHERE id=?", (paper_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Paper not found")
+        
+        # Increment SQL download counter
         db.execute("UPDATE papers SET downloads=downloads+1, updated_at=? WHERE id=?", (int(time.time()), paper_id))
-    path = PDF_DIR / row["stored_name"]
-    if not path.exists():
-        raise HTTPException(404, "PDF file is missing from storage")
-    disposition = "attachment" if download else "inline"
-    return FileResponse(path, media_type="application/pdf", filename=row["file_name"] or "paper.pdf",
-                        content_disposition_type=disposition)
+        
+        # If it is a local uploaded PDF and exists on disk, serve it
+        if row["stored_name"] and row["stored_name"] != "EXTERNAL_URL":
+            path = PDF_DIR / row["stored_name"]
+            if path.exists():
+                disposition = "attachment" if download else "inline"
+                return FileResponse(path, media_type="application/pdf", filename=row["file_name"] or "paper.pdf",
+                                    content_disposition_type=disposition)
+        
+        # Otherwise redirect to the official CBSE / NCERT / NTA / CISCE URL stored in SQL
+        if row["source_url"]:
+            return RedirectResponse(url=row["source_url"])
+            
+        raise HTTPException(404, "PDF file not found")
 
-@app.get("/api/admin/dashboard")
-def dashboard(request: Request):
-    require_admin(request)
-    with connect() as db:
-        total = db.execute("SELECT COUNT(*) n FROM papers").fetchone()["n"]
-        with_file = db.execute("SELECT COUNT(*) n FROM papers WHERE stored_name<>''").fetchone()["n"]
-        downloads = db.execute("SELECT COALESCE(SUM(downloads),0) n FROM papers").fetchone()["n"]
-    return {"total": total, "withFile": with_file, "downloads": downloads}
-
+@app.get("/api/stats")
 @app.get("/api/admin/stats")
-def stats(request: Request):
-    require_admin(request)
+def stats():
     with connect() as db:
         rows = db.execute("""
           SELECT exam, COUNT(*) total,
-          SUM(CASE WHEN stored_name<>'' THEN 1 ELSE 0 END) withFile
+          SUM(CASE WHEN (stored_name<>'' OR source_url<>'') THEN 1 ELSE 0 END) withFile
           FROM papers GROUP BY exam
         """).fetchall()
     return [{"exam": r["exam"], "total": r["total"], "withFile": r["withFile"]} for r in rows]
+
+@app.get("/api/dashboard")
+@app.get("/api/admin/dashboard")
+def dashboard():
+    with connect() as db:
+        total = db.execute("SELECT COUNT(*) n FROM papers").fetchone()["n"]
+        with_file = db.execute("SELECT COUNT(*) n FROM papers WHERE (stored_name<>'' OR source_url<>'')").fetchone()["n"]
+        downloads = db.execute("SELECT COALESCE(SUM(downloads),0) n FROM papers").fetchone()["n"]
+    return {"total": total, "withFile": with_file, "downloads": downloads}
+
+@app.get("/api/mock-tests")
+def list_mock_tests(exam: Optional[str] = None, subject: Optional[str] = None):
+    sql = "SELECT * FROM mock_tests WHERE 1=1"
+    args = []
+    if exam:
+        sql += " AND exam=?"
+        args.append(exam)
+    if subject:
+        sql += " AND subject=?"
+        args.append(subject)
+    with connect() as db:
+        return [dict(r) for r in db.execute(sql, args).fetchall()]
 
 @app.post("/api/admin/papers")
 async def create_paper(request: Request):
@@ -275,16 +345,14 @@ async def create_paper(request: Request):
     upload = form.get("file")
     if upload and getattr(upload, "filename", ""):
         filename, stored, size = save_pdf(upload)
+    elif fields[6]:  # If sourceUrl is provided without file upload, mark as EXTERNAL_URL
+        stored = "EXTERNAL_URL"
     now = int(time.time())
-    try:
-        with connect() as db:
-            cur = db.execute("""INSERT INTO papers
-              (exam,year,subject,session,title,description,source_url,file_name,stored_name,file_size,created_at,updated_at)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (*fields, filename, stored, size, now, now))
-            item = get_paper(db, cur.lastrowid)
-    except Exception:
-        if stored and (PDF_DIR / stored).exists(): (PDF_DIR / stored).unlink()
-        raise
+    with connect() as db:
+        cur = db.execute("""INSERT INTO papers
+          (exam,year,subject,session,title,description,source_url,file_name,stored_name,file_size,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (*fields, filename, stored, size, now, now))
+        item = get_paper(db, cur.lastrowid)
     return item
 
 @app.put("/api/admin/papers/{paper_id}")
@@ -307,9 +375,6 @@ async def update_paper(paper_id: int, request: Request):
         db.execute("""UPDATE papers SET exam=?,year=?,subject=?,session=?,title=?,description=?,source_url=?,
           file_name=?,stored_name=?,file_size=?,updated_at=? WHERE id=?""",
           (*fields, filename, stored, size, int(time.time()), paper_id))
-        if old["stored_name"] and old["stored_name"] != stored:
-            try: (PDF_DIR / old["stored_name"]).unlink(missing_ok=True)
-            except OSError: pass
         return get_paper(db, paper_id)
 
 @app.delete("/api/admin/papers/{paper_id}")
@@ -320,9 +385,6 @@ def delete_paper(paper_id: int, request: Request):
         if not row:
             raise HTTPException(404, "Paper not found")
         db.execute("DELETE FROM papers WHERE id=?", (paper_id,))
-    if row["stored_name"]:
-        try: (PDF_DIR / row["stored_name"]).unlink(missing_ok=True)
-        except OSError: pass
     return {"ok": True}
 
 @app.exception_handler(HTTPException)
