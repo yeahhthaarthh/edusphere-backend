@@ -7,24 +7,19 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
 
-CBSE_BASE_URL = "https://www.cbse.gov.in/"
-ARCHIVE_URL = urljoin(
-    CBSE_BASE_URL,
-    "cbsenew/question-paper.html"
+ARCHIVE_URL = (
+    "https://www.cbse.gov.in/cbsenew/question-paper.html"
 )
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 EduSphere Paper Discovery"
 }
 
-MIN_YEAR = 2010
-MAX_YEAR = 2026
 
-
-def get_cbse_page(url):
+def get_page(url):
     response = requests.get(
         url,
-        timeout=30,
+        timeout=40,
         headers=HEADERS
     )
     response.raise_for_status()
@@ -35,7 +30,7 @@ def get_cbse_page(url):
     )
 
 
-def is_official_cbse_url(url):
+def official_url(url):
     host = urlparse(url).netloc.lower()
 
     return (
@@ -44,217 +39,117 @@ def is_official_cbse_url(url):
     )
 
 
-def get_year_and_class(pdf_url):
-    path = urlparse(pdf_url).path
+def get_exam_details(heading):
+    text = heading.lower()
 
-    year_match = re.search(
-        r"/(20\d{2})/",
-        path
-    )
+    year_match = re.search(r"20\d{2}", text)
 
-    class_match = re.search(
-        r"/(XII|X|CLASS[-_ ]?12|CLASS[-_ ]?10)/",
-        path,
-        re.IGNORECASE
-    )
+    if not year_match:
+        return None
 
-    if not year_match or not class_match:
-        return None, None
-
-    year = int(year_match.group(1))
-    class_code = class_match.group(1).upper()
-
-    if year < MIN_YEAR or year > MAX_YEAR:
-        return None, None
-
-    if class_code in ("XII", "CLASS12", "CLASS-12", "CLASS_12"):
+    if "class xii" in text:
         class_name = "12"
-    else:
+    elif "class x" in text:
         class_name = "10"
+    else:
+        return None
 
-    return str(year), class_name
+    if "compartment" in text:
+        session = "Compartment"
+    elif "second board" in text:
+        session = "Second Board"
+    else:
+        session = "Regular"
+
+    return {
+        "year": year_match.group(),
+        "class_name": class_name,
+        "session": session
+    }
 
 
-def get_subject_details(link):
-    row = link.find_parent("tr")
+def extract_subject_code(url):
+    filename = urlparse(url).path.rsplit("/", 1)[-1]
 
-    if row:
-        cells = row.find_all(["td", "th"])
+    match = re.match(r"(\d+)[_-]", filename)
 
-        if cells:
+    return match.group(1) if match else ""
+
+
+def discover_cbse_papers():
+    soup = get_page(ARCHIVE_URL)
+    discovered = {}
+
+    for table in soup.find_all("table"):
+        heading = table.find_previous(
+            ["h1", "h2", "h3", "h4"]
+        )
+
+        if not heading:
+            continue
+
+        details = get_exam_details(
+            heading.get_text(" ", strip=True)
+        )
+
+        if not details:
+            continue
+
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+
+            if len(cells) < 2:
+                continue
+
             subject = cells[0].get_text(
                 " ",
                 strip=True
             )
 
-            if subject and subject.lower() not in (
+            if not subject or subject.lower() in (
                 "subject name",
                 "subject"
             ):
-                return subject, ""
+                continue
 
-    filename = urlparse(
-        link["href"]
-    ).path.rsplit("/", 1)[-1]
-
-    filename = re.sub(
-        r"\.pdf$",
-        "",
-        filename,
-        flags=re.IGNORECASE
-    )
-
-    code_match = re.match(
-        r"^(\d+)[_-](.+)$",
-        filename
-    )
-
-    if code_match:
-        code = code_match.group(1)
-        subject = code_match.group(2)
-    else:
-        code = ""
-        subject = filename
-
-    subject = subject.replace("_", " ")
-    subject = subject.replace("-", " ").strip()
-
-    return subject, code
-
-
-def get_exam_type(link):
-    for element in link.previous_elements:
-        if not getattr(element, "name", None):
-            continue
-
-        if element.name not in (
-            "h1", "h2", "h3", "h4",
-            "button", "strong"
-        ):
-            continue
-
-        heading = element.get_text(
-            " ",
-            strip=True
-        ).lower()
-
-        if "compartment" in heading:
-            return "Compartment"
-
-        if "second board" in heading:
-            return "Second Board"
-
-        if "sample paper" in heading:
-            return "Sample Paper"
-
-        if "question paper" in heading or "examination" in heading:
-            return "Regular"
-
-    path = urlparse(
-        link["href"]
-    ).path.lower()
-
-    if "compartment" in path:
-        return "Compartment"
-
-    return "Unclassified"
-
-
-def discover_archive_pages():
-    pages = {ARCHIVE_URL}
-
-    soup = get_cbse_page(ARCHIVE_URL)
-
-    keywords = (
-        "question paper",
-        "previous year",
-        "archive",
-        "old paper"
-    )
-
-    for link in soup.find_all("a", href=True):
-        text = link.get_text(
-            " ",
-            strip=True
-        ).lower()
-
-        if not any(word in text for word in keywords):
-            continue
-
-        page_url = urljoin(
-            ARCHIVE_URL,
-            link["href"]
-        )
-
-        parsed = urlparse(page_url)
-
-        if (
-            is_official_cbse_url(page_url)
-            and not parsed.path.lower().endswith(".pdf")
-        ):
-            pages.add(page_url)
-
-    return sorted(pages)
-
-
-def discover_cbse_papers():
-    pages = discover_archive_pages()
-    discovered = {}
-
-    for page_url in pages:
-        try:
-            soup = get_cbse_page(page_url)
-
-        except requests.RequestException:
-            continue
-
-        for link in soup.find_all("a", href=True):
-            pdf_url = urljoin(
-                page_url,
-                link["href"]
-            )
-
-            parsed = urlparse(pdf_url)
-
-            if not (
-                parsed.path.lower().endswith(".pdf")
-                and is_official_cbse_url(pdf_url)
+            for link in cells[1].find_all(
+                "a",
+                href=True
             ):
-                continue
+                file_url = urljoin(
+                    ARCHIVE_URL,
+                    link["href"]
+                )
 
-            year, class_name = get_year_and_class(
-                pdf_url
-            )
+                path = urlparse(file_url).path.lower()
 
-            if not year or not class_name:
-                continue
+                if not (
+                    official_url(file_url)
+                    and path.endswith((".pdf", ".zip"))
+                ):
+                    continue
 
-            subject, subject_code = get_subject_details(
-                link
-            )
+                subject_code = extract_subject_code(
+                    file_url
+                )
 
-            if not subject:
-                continue
+                title = (
+                    f"CBSE Class {details['class_name']} "
+                    f"{subject} {details['year']} "
+                    f"{details['session']}"
+                )
 
-            session = get_exam_type(link)
-
-            title = (
-                f"CBSE Class {class_name} "
-                f"{subject} {year} "
-                f"{session}"
-            )
-
-            discovered[pdf_url] = {
-                "exam": "CBSE",
-                "class_name": class_name,
-                "year": year,
-                "subject": subject,
-                "subject_code": subject_code,
-                "session": session,
-                "title": title,
-                "pdf_url": pdf_url,
-                "source_url": page_url
-            }
+                discovered[file_url] = {
+                    "exam": "CBSE",
+                    "class_name": details["class_name"],
+                    "year": details["year"],
+                    "subject": subject,
+                    "subject_code": subject_code,
+                    "session": details["session"],
+                    "title": title,
+                    "pdf_url": file_url,
+                    "source_url": file_url
+                }
 
     return list(discovered.values())
 
@@ -287,21 +182,11 @@ def sync_cbse_papers():
             db.execute(
                 """
                 INSERT INTO papers (
-                    exam,
-                    year,
-                    subject,
-                    session,
-                    title,
-                    description,
-                    source_url,
-                    file_name,
-                    stored_name,
-                    file_size,
-                    downloads,
-                    created_at,
-                    updated_at,
-                    class_name,
-                    subject_code
+                    exam, year, subject, session,
+                    title, description, source_url,
+                    file_name, stored_name, file_size,
+                    downloads, created_at, updated_at,
+                    class_name, subject_code
                 )
                 VALUES (
                     %s, %s, %s, %s, %s,
