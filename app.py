@@ -1,7 +1,7 @@
 import os, sqlite3, secrets, hashlib, hmac, time, re
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, Request, Response, HTTPException, UploadFile
+from fastapi import FastAPI, Request, Response, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -17,13 +17,18 @@ SESSION_TTL = 60 * 60 * 24 * 7
 MAX_PDF_BYTES = 20 * 1024 * 1024
 SECRET_KEY = os.getenv("SECRET_KEY", "") or secrets.token_urlsafe(48)
 
-app = FastAPI(title="Question Paper Archive API", version="1.0.0")
+app = FastAPI(title="EduSphere Question Paper Archive API", version="1.0.0")
+
+cors_origins_env = os.getenv("CORS_ORIGINS", "https://souray.netlify.app,http://localhost:3000,http://127.0.0.1:3000")
+allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 def connect():
@@ -76,8 +81,23 @@ def init_db():
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mock_tests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          exam TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          question TEXT NOT NULL,
+          option_a TEXT NOT NULL,
+          option_b TEXT NOT NULL,
+          option_c TEXT NOT NULL,
+          option_d TEXT NOT NULL,
+          correct_option TEXT NOT NULL,
+          explanation TEXT NOT NULL,
+          official_source TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_papers_exam_year ON papers(exam, year DESC);
         """)
+        
+        # Default Admin Account
         email = os.getenv("ADMIN_EMAIL", "admin@edusphere.com").strip().lower()
         password = os.getenv("ADMIN_PASSWORD", "admin12345")
         if email and password and not db.execute("SELECT id FROM admins WHERE email=?", (email,)).fetchone():
@@ -86,7 +106,7 @@ def init_db():
                 (email, hash_password(password), int(time.time()))
             )
 
-        # AUTO-INSERT OFFICIAL SQL DATA IF TABLE IS EMPTY
+        # Auto-Seed Official SQL Data if Table is Empty
         count = db.execute("SELECT COUNT(*) as c FROM papers").fetchone()["c"]
         if count == 0:
             db.executescript("""
@@ -111,6 +131,33 @@ def init_db():
 
 init_db()
 
+def clean_email(value: str) -> str:
+    return value.strip().lower()
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def current_admin(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    now = int(time.time())
+    with connect() as db:
+        row = db.execute("""
+          SELECT a.id, a.email, a.is_admin FROM sessions s
+          JOIN admins a ON a.id=s.admin_id
+          WHERE s.token_hash=? AND s.expires_at>?
+        """, (token_hash(token), now)).fetchone()
+        if row:
+            return dict(row)
+    return None
+
+def require_admin(request: Request):
+    admin = current_admin(request)
+    if not admin or not admin["is_admin"]:
+        raise HTTPException(status_code=401, detail="Admin sign-in required")
+    return admin
+
 def paper_dict(row):
     item = dict(row)
     item["hasFile"] = bool(item.get("stored_name") or item.get("source_url"))
@@ -122,6 +169,24 @@ def paper_dict(row):
     item.pop("updated_at", None)
     return item
 
+def parse_paper_fields(exam, year, subject, session, title, description, source_url):
+    exam = (exam or "").strip()
+    subject = (subject or "").strip()
+    title = (title or "").strip()
+    source_url = (source_url or "").strip()
+    if not re.fullmatch(r"[a-z0-9-]{1,60}", exam):
+        raise HTTPException(400, "Invalid exam slug")
+    if not 1990 <= int(year) <= 2100:
+        raise HTTPException(400, "Year must be between 1990 and 2100")
+    if not subject or len(subject) > 100:
+        raise HTTPException(400, "Subject is required (max 100 characters)")
+    if len(title) < 3 or len(title) > 240:
+        raise HTTPException(400, "Title must be between 3 and 240 characters")
+    if source_url and not (source_url.startswith("https://") or source_url.startswith("http://")):
+        raise HTTPException(400, "Source URL must start with http:// or https://")
+    return (exam, int(year), subject, (session or "").strip()[:120], title,
+            (description or "").strip()[:2000], source_url[:1000])
+
 @app.get("/")
 def home():
     with connect() as db:
@@ -129,25 +194,65 @@ def home():
     return {"ok": True, "message": "EduSphere SQL Backend Running", "total_papers_in_sql": total}
 
 @app.get("/api/health")
+@app.get("/api/health/")
 def health():
     return {"ok": True, "service": "question-paper-archive"}
 
+@app.get("/api/session")
+@app.get("/api/session/")
+def session_info(request: Request):
+    admin = current_admin(request)
+    return {"session": {"email": admin["email"], "isAdmin": bool(admin["is_admin"])} if admin else None}
+
+@app.post("/api/auth/login")
+async def login(request: Request, response: Response):
+    body = await request.json()
+    email = clean_email(str(body.get("email", "")))
+    password = str(body.get("password", ""))
+    with connect() as db:
+        row = db.execute("SELECT * FROM admins WHERE email=?", (email,)).fetchone()
+        if not row or not verify_password(password, row["password_hash"]):
+            raise HTTPException(401, "Invalid email or password")
+        token = secrets.token_urlsafe(40)
+        expires = int(time.time()) + SESSION_TTL
+        db.execute("INSERT INTO sessions(token_hash,admin_id,expires_at) VALUES(?,?,?)",
+                   (token_hash(token), row["id"], expires))
+    secure_cookie = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, secure=secure_cookie,
+        samesite="none" if secure_cookie else "lax", max_age=SESSION_TTL, path="/"
+    )
+    return {"session": {"email": row["email"], "isAdmin": bool(row["is_admin"])}}
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        with connect() as db:
+            db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(token),))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
 @app.get("/api/papers")
+@app.get("/api/papers/")
 def list_papers(exam: Optional[str] = None, q: Optional[str] = None, limit: int = 200, offset: int = 0):
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
     sql = "SELECT * FROM papers WHERE 1=1"
     args = []
     if exam:
         sql += " AND exam=?"; args.append(exam)
     if q:
         like = f"%{q.strip()}%"
-        sql += " AND (title LIKE ? OR subject LIKE ? OR CAST(year AS TEXT) LIKE ?)"
-        args.extend([like, like, like])
+        sql += " AND (title LIKE ? OR subject LIKE ? OR session LIKE ? OR CAST(year AS TEXT) LIKE ?)"
+        args.extend([like, like, like, like])
     sql += " ORDER BY year DESC, id DESC LIMIT ? OFFSET ?"
     args.extend([limit, offset])
     with connect() as db:
         return [paper_dict(r) for r in db.execute(sql, args).fetchall()]
 
 @app.get("/api/papers/{paper_id}")
+@app.get("/api/papers/{paper_id}/")
 def read_paper(paper_id: int):
     with connect() as db:
         row = db.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
@@ -156,6 +261,7 @@ def read_paper(paper_id: int):
     return paper_dict(row)
 
 @app.get("/api/papers/{paper_id}/file")
+@app.get("/api/papers/{paper_id}/file/")
 def paper_file(paper_id: int, download: int = 0):
     with connect() as db:
         row = db.execute("SELECT stored_name, file_name, source_url FROM papers WHERE id=?", (paper_id,)).fetchone()
@@ -165,13 +271,16 @@ def paper_file(paper_id: int, download: int = 0):
         if row["stored_name"] and row["stored_name"] != "EXTERNAL_URL":
             path = PDF_DIR / row["stored_name"]
             if path.exists():
-                return FileResponse(path, media_type="application/pdf", filename=row["file_name"] or "paper.pdf")
+                disposition = "attachment" if download else "inline"
+                return FileResponse(path, media_type="application/pdf", filename=row["file_name"] or "paper.pdf", content_disposition_type=disposition)
         if row["source_url"]:
             return RedirectResponse(url=row["source_url"])
     raise HTTPException(404, "PDF not found")
 
 @app.get("/api/stats")
+@app.get("/api/stats/")
 @app.get("/api/admin/stats")
+@app.get("/api/admin/stats/")
 def stats():
     with connect() as db:
         rows = db.execute("""
@@ -182,10 +291,34 @@ def stats():
     return [{"exam": r["exam"], "total": r["total"], "withFile": r["withFile"]} for r in rows]
 
 @app.get("/api/dashboard")
+@app.get("/api/dashboard/")
 @app.get("/api/admin/dashboard")
+@app.get("/api/admin/dashboard/")
 def dashboard():
     with connect() as db:
         total = db.execute("SELECT COUNT(*) n FROM papers").fetchone()["n"]
         with_file = db.execute("SELECT COUNT(*) n FROM papers WHERE (stored_name<>'' OR source_url<>'')").fetchone()["n"]
         downloads = db.execute("SELECT COALESCE(SUM(downloads),0) n FROM papers").fetchone()["n"]
     return {"total": total, "withFile": with_file, "downloads": downloads}
+
+@app.get("/api/mock-tests")
+@app.get("/api/mock-tests/")
+def list_mock_tests(exam: Optional[str] = None, subject: Optional[str] = None):
+    sql = "SELECT * FROM mock_tests WHERE 1=1"
+    args = []
+    if exam:
+        sql += " AND exam=?"
+        args.append(exam)
+    if subject:
+        sql += " AND subject=?"
+        args.append(subject)
+    with connect() as db:
+        return [dict(r) for r in db.execute(sql, args).fetchall()]
+
+@app.post("/api/admin/papers")
+@app.post("/api/admin/papers/")
+async def create_paper(request: Request):
+    require_admin(request)
+    form = await request.form()
+    fields = parse_paper_fields(form.get("exam"), form.get("year"), form.get("subject"),
+                                form.get("session"), form.get("title"), form.get("description"), form.get("source
