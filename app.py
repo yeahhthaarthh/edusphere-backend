@@ -321,4 +321,55 @@ async def create_paper(request: Request):
     require_admin(request)
     form = await request.form()
     fields = parse_paper_fields(form.get("exam"), form.get("year"), form.get("subject"),
-                                form.get("session"), form.get("title"), form.get("description"), form.get("source
+                                form.get("session"), form.get("title"), form.get("description"), form.get("sourceUrl"))
+    filename = stored = ""; size = 0
+    upload = form.get("file")
+    if upload and getattr(upload, "filename", ""):
+        filename, stored, size = save_pdf(upload)
+    elif fields[6]:
+        stored = "EXTERNAL_URL"
+    now = int(time.time())
+    with connect() as db:
+        cur = db.execute("""INSERT INTO papers
+          (exam,year,subject,session,title,description,source_url,file_name,stored_name,file_size,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (*fields, filename, stored, size, now, now))
+        item = get_paper(db, cur.lastrowid)
+    return item
+
+@app.put("/api/admin/papers/{paper_id}")
+@app.put("/api/admin/papers/{paper_id}/")
+async def update_paper(paper_id: int, request: Request):
+    require_admin(request)
+    form = await request.form()
+    fields = parse_paper_fields(form.get("exam"), form.get("year"), form.get("subject"),
+                                form.get("session"), form.get("title"), form.get("description"), form.get("sourceUrl"))
+    with connect() as db:
+        old = db.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
+        if not old:
+            raise HTTPException(404, "Paper not found")
+        filename, stored, size = old["file_name"], old["stored_name"], old["file_size"]
+        upload = form.get("file")
+        if upload and getattr(upload, "filename", ""):
+            filename, stored, size = save_pdf(upload)
+        remove_file = str(form.get("removeFile", "")).lower() == "true"
+        if remove_file:
+            filename, stored, size = "", "", 0
+        db.execute("""UPDATE papers SET exam=?,year=?,subject=?,session=?,title=?,description=?,source_url=?,
+          file_name=?,stored_name=?,file_size=?,updated_at=? WHERE id=?""",
+          (*fields, filename, stored, size, int(time.time()), paper_id))
+        return get_paper(db, paper_id)
+
+@app.delete("/api/admin/papers/{paper_id}")
+@app.delete("/api/admin/papers/{paper_id}/")
+def delete_paper(paper_id: int, request: Request):
+    require_admin(request)
+    with connect() as db:
+        row = db.execute("SELECT stored_name FROM papers WHERE id=?", (paper_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Paper not found")
+        db.execute("DELETE FROM papers WHERE id=?", (paper_id,))
+    return {"ok": True}
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail, "detail": exc.detail})
