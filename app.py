@@ -874,3 +874,66 @@ async def sample_papers_sync(request: Request):
             status_code=500,
             detail=f"Sample paper sync failed: {str(e)}"
         )
+
+@app.get("/api/admin/jee-main-discovery-test")
+async def jee_main_discovery_test(request: Request):
+    require_admin(request)
+
+    try:
+        papers = discover_jee_main_papers()
+
+        summary = {
+            "total_found": len(papers),
+            "by_year": {},
+            "by_session": {},
+            "by_paper_type": {},
+            "by_document_type": {}
+        }
+
+        for paper in papers:
+            year = str(paper["year"])
+            session = paper["session_name"]
+            paper_type = paper["paper_type"]
+            document_type = paper["document_type"]
+
+            summary["by_year"][year] = (
+                summary["by_year"].get(year, 0) + 1
+            )
+
+            summary["by_session"][session] = (
+                summary["by_session"].get(session, 0) + 1
+            )
+
+            summary["by_paper_type"][paper_type] = (
+                summary["by_paper_type"].get(paper_type, 0) + 1
+            )
+
+            summary["by_document_type"][document_type] = (
+                summary["by_document_type"].get(document_type, 0) + 1
+            )
+
+        return {
+            "success": True,
+            "summary": summary,
+            "sample": papers[:15]
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"JEE Main discovery failed: {str(e)}"
+        )
+
+
+@app.post("/api/admin/jee-main-sync")
+async def jee_main_sync(request: Request):
+    require_admin(request)
+
+    try:
+        return sync_jee_main_papers()
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"JEE Main sync failed: {str(e)}"
+        )
