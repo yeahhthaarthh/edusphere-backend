@@ -7,19 +7,49 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
 
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 BASE_URL = "https://jeemain.nta.nic.in/"
 SITEMAP_URL = urljoin(BASE_URL, "sitemap/")
-DOCUMENTS_URL = urljoin(BASE_URL, "documents/")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 EduSphere JEE Main Discovery"
 }
 
 ALLOWED_HOSTS = {
-    "cdnbbsr.s3waas.gov.in",
+    "jeemain.nta.nic.in",
     "nta.ac.in",
-    "www.nta.ac.in"
+    "www.nta.ac.in",
+    "cdnbbsr.s3waas.gov.in",
 }
+
+FIRST_YEAR = 2014
+LAST_YEAR = 2026
+
+
+# --------------------------------------------------
+# GENERAL HELPERS
+# --------------------------------------------------
+
+def clean_text(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def is_official_url(url):
+    parsed = urlparse(url)
+
+    if parsed.scheme != "https":
+        return False
+
+    host = parsed.netloc.lower()
+
+    return (
+        host in ALLOWED_HOSTS
+        or host.endswith(".nta.ac.in")
+        or host.endswith(".s3waas.gov.in")
+    )
 
 
 def get_page(url):
@@ -30,286 +60,366 @@ def get_page(url):
     )
     response.raise_for_status()
 
-    return BeautifulSoup(
-        response.text,
-        "html.parser"
+    return BeautifulSoup(response.text, "html.parser")
+
+
+def extract_year(text):
+    match = re.search(
+        r"\b(201[4-9]|202[0-6])\b",
+        text
     )
 
-
-def is_official_pdf(url):
-    parsed = urlparse(url)
-
-    return (
-        parsed.scheme == "https"
-        and parsed.netloc.lower() in ALLOWED_HOSTS
-        and parsed.path.lower().endswith(".pdf")
-    )
+    return int(match.group(1)) if match else None
 
 
-def identify_paper_type(title):
-    text = title.lower()
+# --------------------------------------------------
+# PAPER CLASSIFICATION
+# --------------------------------------------------
 
-    if "b.planning" in text or "b planning" in text:
+def identify_paper_type(text):
+    text = text.lower()
+
+    if re.search(r"\bb\.?\s*planning\b", text):
         return "Paper 2B"
 
-    if "b.arch" in text or "b arch" in text:
+    if re.search(r"\bb\.?\s*arch\b", text):
         return "Paper 2A"
 
-    if "b tech" in text or "b.tech" in text:
+    if (
+        re.search(r"\bb\.?\s*tech\b", text)
+        or re.search(r"\bb\.?\s*e\.?\b", text)
+    ):
         return "Paper 1"
 
-    return ""
+    return None
 
 
-def extract_date(title):
-    match = re.search(
-        r"(\d{1,2})(?:st|nd|rd|th)?\s+"
-        r"(Jan|January|Feb|February|Mar|March|"
-        r"Apr|April|May|Jun|June|Jul|July|"
-        r"Aug|August|Sep|September|Oct|October|"
-        r"Nov|November|Dec|December)\s+"
-        r"(20\d{2})",
-        title,
-        re.IGNORECASE
-    )
+def identify_document_type(text):
+    text = text.lower()
 
-    if not match:
-        return "", ""
+    if "answer key" in text or "answer-key" in text:
+        return "Answer Key"
 
-    day = int(match.group(1))
-    month = match.group(2).lower()
-    year = match.group(3)
+    if (
+        "question paper" in text
+        or "question-paper" in text
+        or "b.tech" in text
+        or "b.tech." in text
+        or "b.arch" in text
+        or "b.planning" in text
+    ):
+        return "Question Paper"
 
-    month_map = {
-        "jan": "01", "january": "01",
-        "feb": "02", "february": "02",
-        "mar": "03", "march": "03",
-        "apr": "04", "april": "04",
-        "may": "05",
-        "jun": "06", "june": "06",
-        "jul": "07", "july": "07",
-        "aug": "08", "august": "08",
-        "sep": "09", "september": "09",
-        "oct": "10", "october": "10",
-        "nov": "11", "november": "11",
-        "dec": "12", "december": "12"
-    }
-
-    return (
-        f"{year}-{month_map[month]}-{day:02d}",
-        year
-    )
+    return None
 
 
-def extract_session(title):
-    text = title.lower()
+# --------------------------------------------------
+# SESSION, DATE AND SHIFT
+# --------------------------------------------------
 
-    if "session-ii" in text or "session 2" in text:
-        return "Session 2"
+def extract_session(text):
+    text = text.lower()
 
-    if "session-i" in text or "session 1" in text:
+    if re.search(r"session[\s_-]*1\b", text):
         return "Session 1"
 
-    exam_date, year = extract_date(title)
+    if re.search(r"session[\s_-]*2\b", text):
+        return "Session 2"
 
-    if exam_date:
-        month = int(exam_date.split("-")[1])
+    if "january" in text or "jan " in text:
+        return "Session 1"
 
-        if month <= 2:
-            return "Session 1"
-
-        if month >= 3:
-            return "Session 2"
+    if "april" in text or "march" in text:
+        return "Session 2"
 
     return "Not specified"
 
 
-def extract_shift(title):
+def extract_shift(text):
     match = re.search(
-        r"shift\s*[-:]?\s*(1|2)",
-        title,
-        re.IGNORECASE
+        r"\bshift\s*[-:]?\s*([12])\b",
+        text,
+        re.I
     )
 
-    return f"Shift {match.group(1)}" if match else ""
+    if match:
+        return f"Shift {match.group(1)}"
+
+    return ""
 
 
-def extract_language(title):
-    text = title.lower()
+def extract_exam_date(text):
+    from datetime import datetime
 
+    months = (
+        "January|February|March|April|May|June|July|"
+        "August|September|October|November|December"
+    )
+
+    patterns = [
+        rf"\b(\d{{1,2}})\s+({months})\s+(20\d{{2}})\b",
+        rf"\b({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})\b"
+    ]
+
+    for index, pattern in enumerate(patterns):
+        match = re.search(pattern, text, re.I)
+
+        if not match:
+            continue
+
+        try:
+            if index == 0:
+                date_text = match.group(0)
+                parsed = datetime.strptime(
+                    date_text,
+                    "%d %B %Y"
+                )
+            else:
+                month, day, year = match.groups()
+                parsed = datetime.strptime(
+                    f"{day} {month} {year}",
+                    "%d %B %Y"
+                )
+
+            return parsed.strftime("%Y-%m-%d")
+
+        except ValueError:
+            continue
+
+    return ""
+
+
+def extract_language(text):
     languages = [
-        "Hindi", "English", "Assamese",
-        "Bengali", "Gujarati", "Kannada",
-        "Malayalam", "Marathi", "Odia",
-        "Punjabi", "Tamil", "Telugu", "Urdu"
+        "English",
+        "Hindi",
+        "Assamese",
+        "Bengali",
+        "Gujarati",
+        "Kannada",
+        "Malayalam",
+        "Marathi",
+        "Odia",
+        "Punjabi",
+        "Tamil",
+        "Telugu",
+        "Urdu"
     ]
 
-    found = [
-        language
-        for language in languages
-        if language.lower() in text
-    ]
+    lower_text = text.lower()
 
-    return ", ".join(found) if found else "Not specified"
+    for language in languages:
+        if re.search(
+            rf"\b{re.escape(language.lower())}\b",
+            lower_text
+        ):
+            return language
+
+    return "Not specified"
 
 
-def make_record(title, pdf_url, source_page):
-    paper_type = identify_paper_type(title)
+# --------------------------------------------------
+# BUILD INDIVIDUAL PAPER RECORDS
+# --------------------------------------------------
+
+def make_record(title, context, pdf_url, source_page):
+
+    combined_text = clean_text(
+        f"{title} {context}"
+    )
+
+    year = extract_year(combined_text)
+
+    if not year:
+        return None
+
+    paper_type = identify_paper_type(combined_text)
 
     if not paper_type:
         return None
 
-    exam_date, year = extract_date(title)
+    document_type = identify_document_type(
+        combined_text
+    )
 
-    if not year:
-        year_match = re.search(r"20\d{2}", title)
-
-        if year_match:
-            year = year_match.group(0)
-
-    if not year:
+    if not document_type:
         return None
 
-    lower_title = title.lower()
+    exam_date = extract_exam_date(combined_text)
+    shift = extract_shift(combined_text)
+    session = extract_session(combined_text)
+    language = extract_language(combined_text)
 
-    if "answer key" in lower_title or "answer keys" in lower_title:
-        document_type = "Answer Key"
-    elif "question paper" in lower_title or "b tech" in lower_title or "b.arch" in lower_title or "b planning" in lower_title:
-        document_type = "Question Paper"
-    else:
+    # Avoid treating a generic portal link as a paper.
+    if not pdf_url.lower().split("?")[0].endswith(".pdf"):
         return None
-
-    session = extract_session(title)
-
-    shift = extract_shift(title)
-
-    clean_title = re.sub(
-        r"\s+",
-        " ",
-        title
-    ).strip()
 
     return {
-        "year": int(year),
+        "year": year,
         "session_name": session,
         "exam_date": exam_date,
         "shift": shift,
         "paper_type": paper_type,
-        "language": extract_language(title),
+        "language": language,
         "document_type": document_type,
-        "title": clean_title,
+        "title": (
+            f"JEE Main {year} | {session} | "
+            f"{exam_date or 'Date not specified'} | "
+            f"{shift or 'Shift not specified'} | "
+            f"{paper_type} | {document_type}"
+        ),
         "source_url": pdf_url,
         "source_page": source_page,
         "source_authority": "NTA",
-        "verification_status": "official_link"
+        "verification_status": "official_link",
+        "source_type": "direct_pdf",
+        "source_label": "Official NTA PDF"
     }
 
 
-def discover_question_papers():
-    soup = get_page(SITEMAP_URL)
+# --------------------------------------------------
+# DISCOVER OFFICIAL PAPERS
+# --------------------------------------------------
+
+def discover_official_papers():
+
     discovered = {}
 
-    for link in soup.find_all("a", href=True):
-        title = link.get_text(
-            " ",
-            strip=True
-        )
+    pages_to_scan = [
+        BASE_URL,
+        SITEMAP_URL
+    ]
 
-        pdf_url = urljoin(
-            SITEMAP_URL,
-            link["href"]
-        )
-
-        if not is_official_pdf(pdf_url):
-            continue
-
-        record = make_record(
-            title,
-            pdf_url,
-            SITEMAP_URL
-        )
-
-        if record:
-            discovered[pdf_url] = record
-
-    return discovered
-
-
-def discover_answer_keys():
-    discovered = {}
-    pages_to_scan = [DOCUMENTS_URL]
-    scanned = set()
-
-    while pages_to_scan and len(scanned) < 10:
-        page_url = pages_to_scan.pop(0)
-
-        if page_url in scanned:
-            continue
-
-        scanned.add(page_url)
+    for page_url in pages_to_scan:
 
         try:
             soup = get_page(page_url)
+
         except requests.RequestException:
             continue
 
         for link in soup.find_all("a", href=True):
-            title = link.get_text(
-                " ",
-                strip=True
+
+            title = clean_text(
+                link.get_text(" ", strip=True)
             )
 
-            target_url = urljoin(
+            pdf_url = urljoin(
                 page_url,
                 link["href"]
             )
 
-            path = urlparse(target_url).path.lower()
-
-            if "/documents/page/" in path:
-                if target_url not in scanned:
-                    pages_to_scan.append(target_url)
-
-            if not is_official_pdf(target_url):
+            if not title:
                 continue
 
-            if "answer key" not in title.lower() and "answer keys" not in title.lower():
+            if not is_official_url(pdf_url):
                 continue
+
+            if not urlparse(pdf_url).path.lower().endswith(".pdf"):
+                continue
+
+            # Include nearby table/row/parent text.
+            context_parts = []
+
+            for parent in link.parents:
+                if parent.name in ["tr", "li", "article"]:
+                    context_parts.append(
+                        parent.get_text(" ", strip=True)
+                    )
+                    break
+
+            context = " ".join(context_parts)
 
             record = make_record(
                 title,
-                target_url,
+                context,
+                pdf_url,
                 page_url
             )
 
-            if record:
-                discovered[target_url] = record
+            if not record:
+                continue
 
-    return discovered
+            # Each different PDF URL remains a separate record.
+            discovered[pdf_url] = record
+
+    return list(discovered.values())
 
 
-def discover_jee_main_papers():
-    question_papers = discover_question_papers()
-    answer_keys = discover_answer_keys()
+# --------------------------------------------------
+# YEAR-LEVEL FALLBACK LINKS
+# These are NOT paper records.
+# --------------------------------------------------
 
-    combined = {
-        **question_papers,
-        **answer_keys
+def discover_year_fallbacks(papers):
+
+    years_with_direct_papers = {
+        paper["year"] for paper in papers
     }
 
-    return list(combined.values())
+    fallbacks = []
 
+    for year in range(FIRST_YEAR, LAST_YEAR + 1):
+
+        if year in years_with_direct_papers:
+            continue
+
+        fallbacks.append({
+            "year": year,
+            "source_url": BASE_URL,
+            "source_type": "official_page",
+            "source_label": (
+                f"Official NTA JEE Main portal - "
+                f"check {year} archive"
+            ),
+            "source_authority": "NTA",
+            "verification_status": "portal_only"
+        })
+
+    return fallbacks
+
+
+# --------------------------------------------------
+# DISCOVERY FUNCTION
+# --------------------------------------------------
+
+def discover_jee_main_papers():
+
+    papers = discover_official_papers()
+
+    # Store fallback information separately.
+    # Never add fake shifts or fake papers.
+    fallbacks = discover_year_fallbacks(papers)
+
+    return papers
+
+
+# --------------------------------------------------
+# DATABASE SYNC
+# --------------------------------------------------
 
 def sync_jee_main_papers():
+
     from app import connect
 
-    papers = discover_jee_main_papers()
+    papers = discover_official_papers()
+    fallbacks = discover_year_fallbacks(papers)
 
     added = 0
     skipped = 0
+    fallback_added = 0
+    fallback_skipped = 0
+
+    now = int(time.time())
 
     with connect() as db:
+
+        # ------------------------------------------
+        # INSERT REAL PAPER RECORDS
+        # ------------------------------------------
+
         for paper in papers:
+
             existing = db.execute(
                 """
                 SELECT id
@@ -322,8 +432,6 @@ def sync_jee_main_papers():
             if existing:
                 skipped += 1
                 continue
-
-            now = int(time.time())
 
             db.execute(
                 """
@@ -340,12 +448,14 @@ def sync_jee_main_papers():
                     source_page,
                     source_authority,
                     verification_status,
+                    source_type,
+                    source_label,
                     created_at,
                     updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -361,6 +471,8 @@ def sync_jee_main_papers():
                     paper["source_page"],
                     paper["source_authority"],
                     paper["verification_status"],
+                    paper["source_type"],
+                    paper["source_label"],
                     now,
                     now
                 )
@@ -368,9 +480,62 @@ def sync_jee_main_papers():
 
             added += 1
 
+        # ------------------------------------------
+        # INSERT YEAR-LEVEL FALLBACK LINKS
+        # ------------------------------------------
+
+        for fallback in fallbacks:
+
+            existing = db.execute(
+                """
+                SELECT id
+                FROM jee_main_year_sources
+                WHERE year = %s AND source_url = %s
+                """,
+                (
+                    fallback["year"],
+                    fallback["source_url"]
+                )
+            ).fetchone()
+
+            if existing:
+                fallback_skipped += 1
+                continue
+
+            db.execute(
+                """
+                INSERT INTO jee_main_year_sources (
+                    year,
+                    source_url,
+                    source_type,
+                    source_label,
+                    source_authority,
+                    verification_status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    fallback["year"],
+                    fallback["source_url"],
+                    fallback["source_type"],
+                    fallback["source_label"],
+                    fallback["source_authority"],
+                    fallback["verification_status"],
+                    now,
+                    now
+                )
+            )
+
+            fallback_added += 1
+
     return {
         "success": True,
-        "discovered": len(papers),
-        "added": added,
-        "skipped": skipped
+        "direct_papers_discovered": len(papers),
+        "direct_papers_added": added,
+        "direct_papers_skipped": skipped,
+        "year_fallbacks_discovered": len(fallbacks),
+        "year_fallbacks_added": fallback_added,
+        "year_fallbacks_skipped": fallback_skipped
     }
