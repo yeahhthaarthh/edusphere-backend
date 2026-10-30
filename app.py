@@ -805,6 +805,7 @@ async def cbse_sync(request: Request):
             status_code=500,
             detail=f"CBSE sync failed: {str(e)}"
         )
+
 @app.get("/api/admin/sample-discovery-test")
 async def sample_discovery_test(request: Request):
     require_admin(request)
@@ -812,9 +813,33 @@ async def sample_discovery_test(request: Request):
     try:
         papers = discover_sample_papers()
 
+        summary = {
+            "total_found": len(papers),
+            "by_class": {},
+            "by_session": {},
+            "by_document_type": {}
+        }
+
+        for paper in papers:
+            class_name = paper["class_name"]
+            session = paper["academic_session"]
+            document_type = paper["document_type"]
+
+            summary["by_class"][class_name] = (
+                summary["by_class"].get(class_name, 0) + 1
+            )
+
+            summary["by_session"][session] = (
+                summary["by_session"].get(session, 0) + 1
+            )
+
+            summary["by_document_type"][document_type] = (
+                summary["by_document_type"].get(document_type, 0) + 1
+            )
+
         return {
             "success": True,
-            "total_found": len(papers),
+            "summary": summary,
             "sample": papers[:10]
         }
 
@@ -823,17 +848,3 @@ async def sample_discovery_test(request: Request):
             "success": False,
             "error": str(e)
         }
-
-
-@app.post("/api/admin/sample-papers-sync")
-async def sample_papers_sync(request: Request):
-    require_admin(request)
-
-    try:
-        return sync_sample_papers()
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Sample paper sync failed: {str(e)}"
-        )
