@@ -101,3 +101,71 @@ def discover_cbse_papers():
 
     return papers
 
+def sync_cbse_papers():
+    from app import connect, get_paper
+    import time
+
+    papers = discover_cbse_papers()
+    added = 0
+    skipped = 0
+
+    with connect() as db:
+        for paper in papers:
+            existing = db.execute(
+                """
+                SELECT id FROM papers
+                WHERE source_url = %s
+                AND title = %s
+                """,
+                (paper["pdf_url"], paper["title"])
+            ).fetchone()
+
+            if existing:
+                skipped += 1
+                continue
+
+            now = int(time.time())
+
+            row = db.execute(
+                """
+                INSERT INTO papers (
+                    exam, year, subject, session,
+                    title, description, source_url,
+                    file_name, stored_name, file_size,
+                    downloads, created_at, updated_at,
+                    class_name, subject_code
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                RETURNING id
+                """,
+                (
+                    paper["exam"],
+                    paper["year"],
+                    paper["subject"],
+                    paper["session"],
+                    paper["title"],
+                    "Official CBSE question paper",
+                    paper["pdf_url"],
+                    "",
+                    "EXTERNAL_URL",
+                    0,
+                    0,
+                    now,
+                    now,
+                    paper["class_name"],
+                    paper["subject_code"]
+                )
+            ).fetchone()
+
+            added += 1
+
+    return {
+        "success": True,
+        "discovered": len(papers),
+        "added": added,
+        "skipped": skipped
+    }
+
