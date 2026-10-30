@@ -3,3 +3,5 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 psycopg[binary]>=3.2
 supabase>=2.0,<3.0
+requests>=2.31
+beautifulsoup4>=4.12
