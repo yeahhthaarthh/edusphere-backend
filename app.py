@@ -14,6 +14,7 @@ from supabase import create_client
 from fastapi import FastAPI, Request, Response, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Form, File, UploadFile
 from pydantic import BaseModel
 
 class LoginRequest(BaseModel):
