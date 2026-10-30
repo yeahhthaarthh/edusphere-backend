@@ -94,20 +94,14 @@ def identify_paper_type(text):
     return None
 
 
+
 def identify_document_type(text):
     text = text.lower()
 
     if "answer key" in text or "answer-key" in text:
         return "Answer Key"
 
-    if (
-        "question paper" in text
-        or "question-paper" in text
-        or "b.tech" in text
-        or "b.tech." in text
-        or "b.arch" in text
-        or "b.planning" in text
-    ):
+    if identify_paper_type(text):
         return "Question Paper"
 
     return None
