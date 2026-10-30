@@ -14,7 +14,11 @@ from supabase import create_client
 from fastapi import FastAPI, Request, Response, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 # ---------- Configuration ----------
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -381,14 +385,9 @@ def session_info(request: Request):
 
 
 @app.post("/api/auth/login")
-async def login(request: Request, response: Response):
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
-
-    email = clean_email(str(body.get("email", "")))
-    password = str(body.get("password", ""))
+async def login(payload: LoginRequest, response: Response):
+    email = clean_email(payload.email)
+    password = payload.password
 
     with connect() as db:
         row = db.execute(
@@ -426,7 +425,6 @@ async def login(request: Request, response: Response):
             "isAdmin": bool(row["is_admin"]),
         }
     }
-
 
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response):
