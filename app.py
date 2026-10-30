@@ -5,7 +5,10 @@ import uuid
 import hashlib
 import hmac
 import secrets
-from cbse_discovery import discover_cbse_papers
+from cbse_discovery import (
+    discover_cbse_papers,
+    sync_cbse_papers
+)
 from pathlib import Path
 from typing import Optional
 
@@ -784,3 +787,17 @@ async def cbse_discovery_test(request: Request):
             "success": False,
             "error": str(e)
         }
+
+@app.post("/api/admin/cbse-sync")
+async def cbse_sync(request: Request):
+    require_admin(request)
+
+    try:
+        result = sync_cbse_papers()
+        return result
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"CBSE sync failed: {str(e)}"
+        )
