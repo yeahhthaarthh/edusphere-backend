@@ -13,6 +13,10 @@ from cbse_sample_discovery import (
     discover_sample_papers,
     sync_sample_papers
 )
+from jee_main_discovery import (
+    discover_jee_main_papers,
+    sync_jee_main_papers
+)
 from pathlib import Path
 from typing import Optional
 
