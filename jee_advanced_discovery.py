@@ -94,7 +94,7 @@ def make_record(
         "paper_type": stage,
         "language": language,
         "document_type": "Question Paper",
-        "title": f"IIT-JEE {year} {stage} ({language})",
+       "title": f"{'JEE Advanced' if year >= 2007 else 'IIT-JEE'} {year} {stage} ({language})",
         "source_url": url,
         "source_page": page,
         "source_authority": authority,
@@ -167,39 +167,47 @@ def discover_2026_papers():
         return []
 
     records = []
+    seen = set()
 
     for anchor in soup.find_all("a", href=True):
-        text = anchor.get_text(" ", strip=True)
-        context = anchor.parent.get_text(" ", strip=True)
-        combined = f"{text} {context}"
-
-        if excluded(combined):
-            continue
-
-        if not re.search(r"paper\s*[- ]?[12]", combined, re.I):
-            continue
-
         href = urljoin(url, anchor["href"])
+        path = urlparse(href).path.lower()
+        filename = path.rsplit("/", 1)[-1]
 
-        if not urlparse(href).path.lower().endswith(".pdf"):
+        # Identify paper number from the actual PDF filename.
+        paper_match = re.fullmatch(
+            r"p([12])_(english|hindi)\.pdf",
+            filename
+        )
+
+        if not paper_match:
             continue
 
-        stage = detect_stage(combined, 2026)
+        if href in seen:
+            continue
+
+        seen.add(href)
+
+        paper_number = paper_match.group(1)
+        language = paper_match.group(2).capitalize()
+
+        paper_type = f"Paper {paper_number}"
 
         records.append(
             make_record(
-                2026,
-                stage,
-                detect_language(combined),
-                href,
-                url,
-                "JEE Advanced Official",
-                "official_source_link",
-                "2026-05-17"
+                year=2026,
+                stage=paper_type,
+                language=language,
+                url=href,
+                page=url,
+                authority="JEE Advanced Official",
+                status="official_source_link",
+                exam_date="2026-05-17"
             )
         )
 
     return records
+
 
 
 def discover_historical_catalogue():
