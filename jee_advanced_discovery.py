@@ -135,7 +135,8 @@ def make_record(
     organizing_institute=""
 ):
     exam_name = "JEE Advanced" if year >= 2007 else "IIT-JEE"
-
+if not organizing_institute:
+    organizing_institute = ORGANIZING_INSTITUTES.get(year, "")
     return {
         "year": year,
         "exam_date": exam_date,
@@ -242,7 +243,7 @@ def discover_2026_papers():
                 authority="JEE Advanced Official",
                 status="official_source_link",
                 exam_date="2026-05-17",
-                organizing_institute=institute
+                organizing_institute="IIT Roorkee"
             )
         )
 
