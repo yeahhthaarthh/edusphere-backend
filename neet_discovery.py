@@ -37,10 +37,13 @@ HEADERS = {
 }
 
 TIMEOUT = 25
-REQUEST_DELAY = 0.15
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+
+# Only explicitly approved hosts are accepted.
+# If a source redirects to another host, it is rejected.
 
 ALLOWED_HOSTS = {
     "NTA": {
@@ -63,6 +66,11 @@ ALLOWED_HOSTS = {
         "admission.aglasem.com",
     },
 }
+
+
+# ============================================================
+# STRICT DOCUMENT FILTERS
+# ============================================================
 
 EXCLUDED_TERMS = [
     "answer key",
@@ -92,21 +100,34 @@ EXCLUDED_TERMS = [
     "invitation",
     "press release",
     "correction window",
+    "advisory",
+    "candidate instructions",
+    "instructions to candidates",
+    "exam city",
+    "examination centre",
+    "examination center",
+    "exam centre",
+    "exam center",
+    "city intimation",
+    "provisional allotment",
 ]
 
 PAPER_TERMS = [
     "question paper",
     "question papers",
     "question booklet",
+    "question booklets",
     "question book",
     "neet qp",
     "aipmt qp",
     "previous year paper",
     "previous years paper",
+    "previous-year paper",
     "past year paper",
-    "aipmt",
-    "neet",
+    "past years paper",
+    "past-year paper",
 ]
+
 
 LANGUAGE_RULES = [
     ("English & Hindi", ["english & hindi", "eng & hindi"]),
@@ -122,7 +143,7 @@ LANGUAGE_RULES = [
     ("Telugu", ["telugu"]),
     ("Urdu", ["urdu"]),
     ("Hindi", ["hindi"]),
-    ("English", ["english", "eng"]),
+    ("English", ["english"]),
 ]
 
 
@@ -165,35 +186,62 @@ def get_year(text):
     return int(matches[0]) if matches else None
 
 
+def has_exam_name(text):
+    return bool(
+        re.search(r"\bNEET\b|\bAIPMT\b", text or "", re.I)
+    )
+
+
 def is_excluded(text):
     text = clean_text(text).lower()
+
     return any(term in text for term in EXCLUDED_TERMS)
 
 
-def has_exam_name(text):
-    return bool(
-        re.search(r"\bneet\b|\baipmt\b", text or "", re.I)
-    )
-
-
 def is_actual_question_paper(title, context=""):
-    text = clean_text(f"{title} {context}")
+    """
+    Conservative validation.
 
-    if not text or is_excluded(text):
+    A document must:
+    1. Mention NEET or AIPMT.
+    2. Explicitly identify itself as a question paper/booklet.
+    3. Not contain excluded administrative/document terms.
+
+    Merely mentioning NEET or AIPMT is never sufficient.
+    """
+
+    title_text = clean_text(title).lower()
+    context_text = clean_text(context).lower()
+
+    combined = clean_text(
+        f"{title_text} {context_text}"
+    ).lower()
+
+    if not combined:
         return False
 
-    return (
-        has_exam_name(text)
-        and any(term in text.lower() for term in PAPER_TERMS)
-    )
+    # Reject administrative and non-paper documents.
+    if is_excluded(combined):
+        return False
+
+    # Require an explicit exam name.
+    if not has_exam_name(combined):
+        return False
+
+    # Require explicit question-paper wording.
+    if not any(term in combined for term in PAPER_TERMS):
+        return False
+
+    return True
 
 
 def get_language(text):
     text = clean_text(text).lower()
 
     for language, terms in LANGUAGE_RULES:
-        if any(term in text for term in terms):
-            return language
+        for term in terms:
+            if term in text:
+                return language
 
     return "Unknown"
 
@@ -217,8 +265,13 @@ def get_exam_session(text):
     text = clean_text(text).lower()
 
     if any(term in text for term in [
-        "re-neet", "re neet", "re-exam", "re exam",
-        "re-examination", "re examination", "retest",
+        "re-neet",
+        "re neet",
+        "re-exam",
+        "re exam",
+        "re-examination",
+        "re examination",
+        "retest",
     ]):
         return "Re-Examination"
 
@@ -267,17 +320,28 @@ def get_exam_code(text):
 
 def get_anchor_context(anchor, depth=4):
     parts = []
-
     node = anchor
 
     for _ in range(depth):
         if node is None:
             break
 
-        parts.append(clean_text(node.get_text(" ", strip=True)))
+        parts.append(
+            clean_text(node.get_text(" ", strip=True))
+        )
+
         node = node.parent
 
     return clean_text(" ".join(parts))
+
+
+def is_pdf_url(url):
+    if not url:
+        return False
+
+    path = urlparse(url).path.lower()
+
+    return path.endswith(".pdf") or path.endswith(".pdf/")
 
 
 # ============================================================
@@ -286,6 +350,7 @@ def get_anchor_context(anchor, depth=4):
 
 def fetch_html(url, source):
     if not allowed_url(url, source):
+        print("[BLOCKED SOURCE URL]", url)
         return None
 
     try:
@@ -306,28 +371,23 @@ def fetch_html(url, source):
         ).lower()
 
         if "html" not in content_type:
+            print("[NOT HTML]", url, content_type)
             return None
 
-        return BeautifulSoup(response.text, "html.parser")
+        return BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
 
     except requests.RequestException as exc:
         print(f"[HTML ERROR] {url}: {exc}")
         return None
 
 
-def is_pdf_url(url):
-    if not url:
-        return False
-
-    path = urlparse(url).path.lower()
-
-    return path.endswith(".pdf") or path.endswith(".pdf/")
-
-
 def verify_pdf(url, source):
     """
-    Verify the actual PDF signature.
-    Redirects are permitted only to explicitly allowed hosts.
+    Verify that the URL returns a real PDF.
+    Redirects are allowed only to approved hosts.
     """
 
     if not allowed_url(url, source):
@@ -342,10 +402,8 @@ def verify_pdf(url, source):
             stream=True,
         )
 
-        final_url = response.url
-
-        if not allowed_url(final_url, source):
-            print("[BLOCKED PDF REDIRECT]", final_url)
+        if not allowed_url(response.url, source):
+            print("[BLOCKED PDF REDIRECT]", response.url)
             response.close()
             return False
 
@@ -372,8 +430,12 @@ def make_record(
 ):
     title = clean_text(title)
     context = clean_text(context)
-    combined = clean_text(f"{title} {context}")
 
+    combined = clean_text(
+        f"{title} {context}"
+    )
+
+    # Strict question-paper validation.
     if not is_actual_question_paper(title, context):
         return None
 
@@ -385,6 +447,9 @@ def make_record(
     pdf_url = normalise_url(pdf_url)
 
     if not allowed_url(pdf_url, source_name):
+        return None
+
+    if not is_pdf_url(pdf_url):
         return None
 
     if not verify_pdf(pdf_url, source_name):
@@ -434,6 +499,7 @@ def make_record(
 
 def discover_nta():
     records = []
+
     soup = fetch_html(NTA_ARCHIVE, "NTA")
 
     if not soup:
@@ -442,8 +508,11 @@ def discover_nta():
 
     seen = set()
 
+    # Table-based archive entries.
     for row in soup.find_all("tr"):
-        context = clean_text(row.get_text(" ", strip=True))
+        context = clean_text(
+            row.get_text(" ", strip=True)
+        )
 
         if not is_actual_question_paper(context):
             continue
@@ -457,18 +526,18 @@ def discover_nta():
                 continue
 
             record = make_record(
-                context,
-                pdf_url,
-                NTA_ARCHIVE,
-                "NTA",
-                context,
+                title=context,
+                pdf_url=pdf_url,
+                source_page=NTA_ARCHIVE,
+                source_name="NTA",
+                context=context,
             )
 
             if record and pdf_url not in seen:
                 seen.add(pdf_url)
                 records.append(record)
 
-    # Fallback for non-table archive entries.
+    # Non-table archive entries.
     for anchor in soup.find_all("a", href=True):
         pdf_url = normalise_url(
             urljoin(NTA_ARCHIVE, anchor["href"])
@@ -479,15 +548,18 @@ def discover_nta():
 
         context = get_anchor_context(anchor)
 
+        if not is_actual_question_paper(context):
+            continue
+
         record = make_record(
-            context,
-            pdf_url,
-            NTA_ARCHIVE,
-            "NTA",
-            context,
+            title=context,
+            pdf_url=pdf_url,
+            source_page=NTA_ARCHIVE,
+            source_name="NTA",
+            context=context,
         )
 
-        if record:
+        if record and pdf_url not in seen:
             seen.add(pdf_url)
             records.append(record)
 
@@ -501,7 +573,11 @@ def discover_nta():
 
 def discover_examgoal():
     records = []
-    soup = fetch_html(EXAMGOAL_ARCHIVE, "ExamGOAL")
+
+    soup = fetch_html(
+        EXAMGOAL_ARCHIVE,
+        "ExamGOAL",
+    )
 
     if not soup:
         print("[ExamGOAL] Archive unavailable")
@@ -514,28 +590,24 @@ def discover_examgoal():
             urljoin(EXAMGOAL_ARCHIVE, anchor["href"])
         )
 
-        if not (
-            "/download/paper/medical/neet/" in href
-            or is_pdf_url(href)
-        ):
+        if not is_pdf_url(href):
             continue
 
-        context = get_anchor_context(anchor, depth=5)
+        context = get_anchor_context(
+            anchor,
+            depth=5,
+        )
+
+        if not is_actual_question_paper(context):
+            continue
+
         year = get_year(context + " " + href)
 
         if not year or not START_YEAR <= year <= END_YEAR:
             continue
 
-        if not has_exam_name(context + " " + href):
-            continue
-
-        if is_excluded(context):
-            continue
-
-        title = context
-
         record = make_record(
-            title=title,
+            title=context,
             pdf_url=href,
             source_page=EXAMGOAL_ARCHIVE,
             source_name="ExamGOAL",
@@ -556,7 +628,11 @@ def discover_examgoal():
 
 def discover_pracbee():
     records = []
-    soup = fetch_html(PRACBEE_ARCHIVE, "PracBee")
+
+    soup = fetch_html(
+        PRACBEE_ARCHIVE,
+        "PracBee",
+    )
 
     if not soup:
         print("[PracBee] Archive unavailable")
@@ -572,22 +648,21 @@ def discover_pracbee():
         if not is_pdf_url(href):
             continue
 
-        context = get_anchor_context(anchor, depth=5)
+        context = get_anchor_context(
+            anchor,
+            depth=5,
+        )
+
+        if not is_actual_question_paper(context):
+            continue
+
         year = get_year(context + " " + href)
 
         if not year or not START_YEAR <= year <= END_YEAR:
             continue
 
-        if "neet" not in context.lower() and "aipmt" not in context.lower():
-            continue
-
-        if is_excluded(context):
-            continue
-
-        title = context
-
         record = make_record(
-            title=title,
+            title=context,
             pdf_url=href,
             source_page=PRACBEE_ARCHIVE,
             source_name="PracBee",
@@ -608,13 +683,16 @@ def discover_pracbee():
 
 def discover_aglasem():
     """
-    Supplementary source.
-    Only direct PDF links are accepted in this version.
-    Document-view pages requiring sign-in are not marked verified.
+    Only direct PDF links are accepted.
+    Document-view pages are not treated as verified PDFs.
     """
 
     records = []
-    soup = fetch_html(AGLASEM_ARCHIVE, "AglaSem")
+
+    soup = fetch_html(
+        AGLASEM_ARCHIVE,
+        "AglaSem",
+    )
 
     if not soup:
         print("[AglaSem] Archive unavailable")
@@ -630,13 +708,17 @@ def discover_aglasem():
         if not is_pdf_url(href):
             continue
 
-        context = get_anchor_context(anchor, depth=5)
+        context = get_anchor_context(
+            anchor,
+            depth=5,
+        )
+
+        if not is_actual_question_paper(context):
+            continue
+
         year = get_year(context + " " + href)
 
         if not year or not START_YEAR <= year <= END_YEAR:
-            continue
-
-        if not is_actual_question_paper(context):
             continue
 
         record = make_record(
@@ -676,6 +758,7 @@ def discover_neet_papers():
 
         try:
             found = function()
+
             source_counts[name] = len(found)
             all_records.extend(found)
 
@@ -683,7 +766,7 @@ def discover_neet_papers():
             source_counts[name] = 0
             print(f"[{name} ERROR] {exc}")
 
-    # Deduplicate identical URLs only.
+    # Deduplicate identical URLs.
     unique = {}
 
     for record in all_records:
@@ -713,7 +796,9 @@ def discover_neet_papers():
         year = record["year"]
         source = record["source_authority"]
 
-        year_counts[year] = year_counts.get(year, 0) + 1
+        year_counts[year] = (
+            year_counts.get(year, 0) + 1
+        )
 
         if source not in source_year_counts:
             source_year_counts[source] = {}
@@ -726,16 +811,22 @@ def discover_neet_papers():
     print("Total unique PDFs:", len(results))
 
     print("\nSource counts:")
+
     for source, count in source_counts.items():
         print(f"{source}: {count}")
 
     print("\nYear-wise PDF counts:")
+
     for year in range(START_YEAR, END_YEAR + 1):
-        print(f"{year}: {year_counts.get(year, 0)}")
+        print(
+            f"{year}: {year_counts.get(year, 0)}"
+        )
 
     print("\nSource-wise year counts:")
+
     for source, counts in source_year_counts.items():
         print(f"\n{source}:")
+
         for year in sorted(counts):
             print(f"  {year}: {counts[year]}")
 
@@ -762,7 +853,10 @@ def sync_neet_papers():
     if not records:
         return {
             "success": False,
-            "message": "No verified papers found. Database unchanged.",
+            "message": (
+                "No verified papers found. "
+                "Database unchanged."
+            ),
             "discovered": 0,
             "inserted_or_updated": 0,
         }
@@ -790,7 +884,9 @@ def sync_neet_papers():
         "download_mode",
     ]
 
-    placeholders = ", ".join(["%s"] * len(columns))
+    placeholders = ", ".join(
+        ["%s"] * len(columns)
+    )
 
     sql = f"""
         INSERT INTO public.neet_papers (
@@ -835,7 +931,10 @@ def sync_neet_papers():
 
         for record in records:
             year = record["year"]
-            year_counts[year] = year_counts.get(year, 0) + 1
+
+            year_counts[year] = (
+                year_counts.get(year, 0) + 1
+            )
 
         return {
             "success": True,
