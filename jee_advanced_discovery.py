@@ -37,7 +37,13 @@ def fetch_soup(url):
         return None
 
 
+
 def detect_organizing_institute(year, soup=None, page_url=""):
+    """
+    Detect the organising IIT from official JEE Advanced pages.
+    Never guess an institute if an official announcement is absent.
+    """
+
     if soup is None and page_url:
         soup = fetch_soup(page_url)
 
@@ -47,29 +53,45 @@ def detect_organizing_institute(year, soup=None, page_url=""):
     text = soup.get_text(" ", strip=True)
 
     patterns = [
-        r"Organizing Institute\s*[:\-–]\s*(IIT\s*[\w\s]+)",
-        r"Organising Institute\s*[:\-–]\s*(IIT\s*[\w\s]+)",
-        r"Organizing Institute\s*[:\-–]\s*(Indian Institute of Technology\s+[\w\s]+)",
-        r"Organising Institute\s*[:\-–]\s*(Indian Institute of Technology\s+[\w\s]+)",
+        r"Organizing Institute\s*[:\-–]\s*"
+        r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
+
+        r"Organising Institute\s*[:\-–]\s*"
+        r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
+
+        r"(?:conducted|organised|organized)\s+by\s+"
+        r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
+
+        r"(?:JEE Advanced|Joint Entrance Examination Advanced)"
+        r"\s+" + str(year) + r".{0,100}?"
+        r"(?:IIT|Indian Institute of Technology)\s+"
+        r"([A-Za-z ]+)"
     ]
 
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            institute = match.group(1).strip()
-            institute = re.split(
-                r"(?=Participating Institutes|Important Announcements|Contact Details)",
-                institute,
-                maxsplit=1,
-                flags=re.IGNORECASE
-            )[0].strip()
 
-            institute = re.sub(
-                r"^Indian Institute of Technology",
-                "IIT",
-                institute,
-                flags=re.IGNORECASE
-            )
+        if not match:
+            continue
+
+        institute = match.group(1).strip()
+
+        institute = re.split(
+            r"[|.;,\n]",
+            institute,
+            maxsplit=1
+        )[0].strip()
+
+        institute = re.sub(
+            r"^Indian Institute of Technology",
+            "IIT",
+            institute,
+            flags=re.IGNORECASE
+        )
+
+        institute = re.sub(r"\s+", " ", institute).strip()
+
+        if institute.upper().startswith("IIT "):
             return institute
 
     return ""
