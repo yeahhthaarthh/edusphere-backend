@@ -945,7 +945,25 @@ async def jee_main_sync(request: Request):
             status_code=500,
             detail=f"JEE Main sync failed: {str(e)}"
         )
-        from jee_advanced_discovery import (
-    discover_jee_advanced_papers,
-    sync_jee_advanced_papers
-)
+# ==================================================
+# JEE ADVANCED DISCOVERY
+# ==================================================
+
+@app.get("/api/admin/jee-advanced-discovery-test")
+def jee_advanced_discovery_test(request: Request):
+    require_admin(request)
+
+    papers = discover_jee_advanced_papers()
+
+    return {
+        "success": True,
+        "discovered": len(papers),
+        "papers": papers
+    }
+
+
+@app.post("/api/admin/jee-advanced-sync")
+def jee_advanced_sync(request: Request):
+    require_admin(request)
+
+    return sync_jee_advanced_papers()       
