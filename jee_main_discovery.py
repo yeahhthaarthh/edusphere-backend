@@ -4,7 +4,7 @@ import time
 import requests
 
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urldefrag
 from datetime import datetime
 from collections import deque
 
@@ -48,6 +48,11 @@ SEED_PAGES = [
 
 def clean_text(value):
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def canonical_url(url):
+    url, _ = urldefrag(url)
+    return url.strip()
 
 
 def is_official_url(url):
@@ -94,7 +99,6 @@ def is_relevant_page(url):
         "sitemap",
         "download",
         "notice",
-        "answer",
     )
 
     return any(word in path for word in keywords)
@@ -102,6 +106,9 @@ def is_relevant_page(url):
 
 # ==================================================
 # EXTRACT YEAR
+# Only use visible title and page context.
+# Do not use the PDF URL because its date may
+# represent upload date rather than exam year.
 # ==================================================
 
 def extract_year(text):
@@ -126,10 +133,16 @@ def identify_paper_type(text):
     if re.search(r"\bb\.?\s*arch\b", text):
         return "Paper 2A"
 
+    if re.search(r"\bpaper\s*2b\b", text):
+        return "Paper 2B"
+
+    if re.search(r"\bpaper\s*2a\b", text):
+        return "Paper 2A"
+
     if (
         re.search(r"\bb\.?\s*tech\b", text)
         or re.search(r"\bb\.?\s*e\.?\s*/?\s*b\.?\s*tech\b", text)
-        or "paper 1" in text
+        or re.search(r"\bpaper\s*1\b", text)
     ):
         return "Paper 1"
 
@@ -138,28 +151,37 @@ def identify_paper_type(text):
 
 # ==================================================
 # DOCUMENT TYPE
+# Only accept actual Question Paper documents.
+# Answer Keys and solutions are excluded.
 # ==================================================
 
 def identify_document_type(text):
     text = (text or "").lower()
 
-    if "answer key" in text or "answer-key" in text:
-        return "Answer Key"
+    excluded_terms = (
+        "answer key",
+        "answer-key",
+        "final answer",
+        "provisional answer",
+        "response sheet",
+        "recorded response",
+        "question paper with answer",
+        "solution",
+        "solutions",
+    )
 
-    if (
-        identify_paper_type(text)
-        and (
-            "question paper" in text
-            or "question-paper" in text
-            or "b.tech" in text
-            or "b.e." in text
-            or "b.arch" in text
-            or "b.planning" in text
-            or "paper 1" in text
-            or "paper 2" in text
-        )
-    ):
-        return "Question Paper"
+    if any(term in text for term in excluded_terms):
+        return None
+
+    question_paper_terms = (
+        "question paper",
+        "question-paper",
+        "questionpaper",
+    )
+
+    if any(term in text for term in question_paper_terms):
+        if identify_paper_type(text):
+            return "Question Paper"
 
     return None
 
@@ -266,7 +288,7 @@ def extract_language(text):
 # ==================================================
 
 def make_record(title, context, pdf_url, source_page):
-    combined = clean_text(f"{title} {context} {pdf_url}")
+    visible_text = clean_text(f"{title} {context}")
 
     if not is_official_url(pdf_url):
         return None
@@ -274,30 +296,35 @@ def make_record(title, context, pdf_url, source_page):
     if not is_pdf_url(pdf_url):
         return None
 
-    year = extract_year(combined)
+    # Never use PDF URL text to determine exam year.
+    year = extract_year(visible_text)
 
     if not year:
         return None
 
-    paper_type = identify_paper_type(combined)
+    paper_type = identify_paper_type(visible_text)
 
     if not paper_type:
         return None
 
-    document_type = identify_document_type(combined)
+    document_type = identify_document_type(visible_text)
 
-    if not document_type:
+    if document_type != "Question Paper":
         return None
 
-    # Avoid treating unrelated NTA notices as question papers.
-    if "jee main" not in combined.lower() and "jeemain" not in combined.lower():
-        if "b.tech" not in combined.lower() and "b.e." not in combined.lower():
-            return None
+    lower_text = visible_text.lower()
 
-    exam_date = extract_exam_date(combined)
-    session = extract_session(combined)
-    shift = extract_shift(combined)
-    language = extract_language(combined)
+    # Require a clear JEE Main reference.
+    if (
+        "jee main" not in lower_text
+        and "jeemain" not in lower_text
+    ):
+        return None
+
+    exam_date = extract_exam_date(visible_text)
+    session = extract_session(visible_text)
+    shift = extract_shift(visible_text)
+    language = extract_language(visible_text)
 
     date_label = exam_date or "Date not specified"
     shift_label = shift or "Shift not specified"
@@ -305,7 +332,7 @@ def make_record(title, context, pdf_url, source_page):
     record_title = (
         f"JEE Main {year} | {session} | "
         f"{date_label} | {shift_label} | "
-        f"{paper_type} | {document_type}"
+        f"{paper_type} | Question Paper"
     )
 
     return {
@@ -315,7 +342,7 @@ def make_record(title, context, pdf_url, source_page):
         "shift": shift,
         "paper_type": paper_type,
         "language": language,
-        "document_type": document_type,
+        "document_type": "Question Paper",
         "title": record_title,
         "source_url": pdf_url,
         "source_page": source_page,
@@ -338,10 +365,11 @@ def discover_official_papers():
 
     for page in SEED_PAGES:
         if is_official_url(page):
-            queue.append((page, 0))
+            queue.append((canonical_url(page), 0))
 
     while queue and len(visited) < MAX_PAGES:
         page_url, depth = queue.popleft()
+        page_url = canonical_url(page_url)
 
         if page_url in visited:
             continue
@@ -359,7 +387,9 @@ def discover_official_papers():
             if not href:
                 continue
 
-            target_url = urljoin(page_url, href)
+            target_url = canonical_url(
+                urljoin(page_url, href)
+            )
 
             if not is_official_url(target_url):
                 continue
@@ -368,20 +398,21 @@ def discover_official_papers():
                 link.get_text(" ", strip=True)
             )
 
+            # Use only the nearest parent context.
+            # Do not collect several ancestor levels,
+            # as that can mix unrelated documents.
             parent = link.parent
 
-            context_parts = [title]
+            parent_context = ""
 
-            for _ in range(3):
-                if parent is None:
-                    break
-
-                context_parts.append(
+            if parent is not None:
+                parent_context = clean_text(
                     parent.get_text(" ", strip=True)
                 )
-                parent = parent.parent
 
-            context = clean_text(" ".join(context_parts))
+            context = clean_text(
+                f"{title} {parent_context}"
+            )
 
             if is_pdf_url(target_url):
                 record = make_record(
@@ -401,7 +432,9 @@ def discover_official_papers():
                 and target_url not in visited
                 and is_relevant_page(target_url)
             ):
-                queue.append((target_url, depth + 1))
+                queue.append(
+                    (target_url, depth + 1)
+                )
 
     return list(discovered.values())
 
@@ -427,8 +460,8 @@ def discover_year_fallbacks(papers):
             "source_url": BASE_URL,
             "source_type": "official_page",
             "source_label": (
-                f"Official NTA portal - "
-                f"check JEE Main {year} archive"
+                f"NTA portal only - "
+                f"{year} year-specific archive not verified"
             ),
             "source_authority": "NTA",
             "verification_status": "portal_only"
