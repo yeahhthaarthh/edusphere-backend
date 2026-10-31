@@ -135,7 +135,7 @@ def make_record(
     organizing_institute=""
 ):
     exam_name = "JEE Advanced" if year >= 2007 else "IIT-JEE"
-if not organizing_institute:
+    if not organizing_institute:
     organizing_institute = ORGANIZING_INSTITUTES.get(year, "")
     return {
         "year": year,
