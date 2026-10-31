@@ -1,4 +1,3 @@
-
 import re
 import time
 from urllib.parse import urljoin, urlparse
@@ -62,10 +61,28 @@ EXAM_DATES = {
 
 
 # =========================================================
+# OFFICIAL URL VALIDATION
+# =========================================================
+
+def is_official_url(url):
+    try:
+        parsed = urlparse(url)
+
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == OFFICIAL_HOST
+        )
+
+    except (ValueError, TypeError):
+        return False
+
+
+# =========================================================
 # WEBPAGE FETCHING
 # =========================================================
 
 def fetch_soup(url):
+
     if not is_official_url(url):
         print(f"Rejected non-official URL: {url}")
         return None
@@ -93,24 +110,12 @@ def fetch_soup(url):
         return None
 
 
-def is_official_url(url):
-    try:
-        parsed = urlparse(url)
-
-        return (
-            parsed.scheme == "https"
-            and parsed.hostname == OFFICIAL_HOST
-        )
-
-    except (ValueError, TypeError):
-        return False
-
-
 # =========================================================
 # ORGANISING INSTITUTE DETECTION
 # =========================================================
 
 def normalize_institute(name):
+
     if not name:
         return ""
 
@@ -132,6 +137,7 @@ def detect_organizing_institute(
     soup=None,
     page_url=""
 ):
+
     if year in ORGANIZING_INSTITUTES:
         return ORGANIZING_INSTITUTES[year]
 
@@ -157,6 +163,7 @@ def detect_organizing_institute(
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
             text,
@@ -189,6 +196,7 @@ def detect_organizing_institute(
 # =========================================================
 
 def is_excluded(text):
+
     value = text.lower()
 
     return any(
@@ -198,6 +206,7 @@ def is_excluded(text):
 
 
 def detect_stage(text, year):
+
     value = text.lower()
 
     if "screening" in value:
@@ -214,7 +223,6 @@ def detect_stage(text, year):
     if len(set(matches)) == 1:
         return f"Paper {matches[0]}"
 
-    # Do not silently classify an ambiguous document as Paper 1.
     if year <= 2006:
         return "IIT-JEE Paper"
 
@@ -222,6 +230,7 @@ def detect_stage(text, year):
 
 
 def detect_language(text):
+
     value = text.lower()
 
     if "hindi" in value:
@@ -248,6 +257,7 @@ def make_record(
     exam_date="",
     organizing_institute=""
 ):
+
     if not is_official_url(url):
         return None
 
@@ -299,6 +309,7 @@ def make_record(
 # =========================================================
 
 def discover_official_papers():
+
     soup = fetch_soup(ARCHIVE_URL)
 
     if soup is None:
@@ -377,6 +388,7 @@ def discover_official_papers():
 # =========================================================
 
 def discover_current_official_papers():
+
     soup = fetch_soup(OFFICIAL_URL)
 
     if soup is None:
@@ -506,6 +518,7 @@ def sync_jee_advanced_papers():
     synced = 0
 
     with connect() as db:
+
         with db.cursor() as cur:
 
             for record in records:
@@ -544,6 +557,21 @@ def sync_jee_advanced_papers():
                     )
                     ON CONFLICT (source_url)
                     DO UPDATE SET
+                        year = EXCLUDED.year,
+                        exam_date = EXCLUDED.exam_date,
+                        paper_type = EXCLUDED.paper_type,
+                        language = EXCLUDED.language,
+                        document_type = EXCLUDED.document_type,
+                        title = EXCLUDED.title,
+                        source_page = EXCLUDED.source_page,
+                        source_authority = EXCLUDED.source_authority,
+                        source_type = EXCLUDED.source_type,
+                        source_label = EXCLUDED.source_label,
+                        verification_status = EXCLUDED.verification_status,
+                        exam_name = EXCLUDED.exam_name,
+                        stage = EXCLUDED.stage,
+                        exam_session = EXCLUDED.exam_session,
+
                         organizing_institute =
                             CASE
                                 WHEN EXCLUDED.organizing_institute <> ''
@@ -551,20 +579,17 @@ def sync_jee_advanced_papers():
                                 ELSE jee_advanced_papers.organizing_institute
                             END,
 
-                        download_url =
-                            EXCLUDED.download_url,
+                        download_url = EXCLUDED.download_url,
+                        download_mode = EXCLUDED.download_mode,
 
-                        download_mode =
-                            EXCLUDED.download_mode,
+                        storage_path =
+                            CASE
+                                WHEN EXCLUDED.storage_path <> ''
+                                THEN EXCLUDED.storage_path
+                                ELSE jee_advanced_papers.storage_path
+                            END,
 
-                        source_type =
-                            EXCLUDED.source_type,
-
-                        source_label =
-                            EXCLUDED.source_label,
-
-                        updated_at =
-                            EXCLUDED.updated_at
+                        updated_at = EXCLUDED.updated_at
                     """,
                     (
                         record["year"],
