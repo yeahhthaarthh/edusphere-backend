@@ -221,17 +221,18 @@ def discover_2026_papers():
 
     records = []
     seen = set()
-organizing_institute = detect_organizing_institute(
-    year=2026,
-    soup=soup,
-    page_url=url
-)
+
+    organizing_institute = detect_organizing_institute(
+        year=2026,
+        soup=soup,
+        page_url=url
+    )
+
     for anchor in soup.find_all("a", href=True):
         href = urljoin(url, anchor["href"])
         path = urlparse(href).path.lower()
         filename = path.rsplit("/", 1)[-1]
 
-        # Identify paper number from the actual PDF filename.
         paper_match = re.fullmatch(
             r"p([12])_(english|hindi)\.pdf",
             filename
@@ -247,22 +248,22 @@ organizing_institute = detect_organizing_institute(
 
         paper_number = paper_match.group(1)
         language = paper_match.group(2).capitalize()
-
         paper_type = f"Paper {paper_number}"
 
-      records.append(
-    make_record(
-        year=2026,
-        stage=paper_type,
-        language=language,
-        url=href,
-        page=url,
-        authority="JEE Advanced Official",
-        status="official_source_link",
-        exam_date="2026-05-17",
-        organizing_institute=organizing_institute
-    )
-)
+        record = make_record(
+            year=2026,
+            stage=paper_type,
+            language=language,
+            url=href,
+            page=url,
+            authority="JEE Advanced Official",
+            status="official_source_link",
+            exam_date="2026-05-17",
+            organizing_institute=organizing_institute
+        )
+
+        records.append(record)
+
     return records
 
 
