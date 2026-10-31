@@ -5,6 +5,10 @@ import uuid
 import hashlib
 import hmac
 import secrets
+import os
+from urllib.parse import urlparse
+from fastapi import HTTPException
+from fastapi.responses import RedirectResponse
 from cbse_discovery import (
     discover_cbse_papers,
     sync_cbse_papers
@@ -967,3 +971,90 @@ def jee_advanced_sync(request: Request):
     require_admin(request)
 
     return sync_jee_advanced_papers()       
+
+@app.get("/api/jee-advanced-papers/{paper_id}/view")
+def view_jee_advanced_pdf(paper_id: int):
+    """
+    Opens a JEE Advanced PDF inside an EduSphere iframe.
+    Uses Supabase Storage when a stored file exists.
+    Otherwise uses the official JEE Advanced PDF.
+    """
+
+    from app import connect
+
+    with connect() as db:
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, title, source_url,
+                       download_url, storage_path
+                FROM jee_advanced_papers
+                WHERE id = %s
+                """,
+                (paper_id,)
+            )
+            paper = cur.fetchone()
+
+    if not paper:
+        raise HTTPException(
+            status_code=404,
+            detail="Paper not found"
+        )
+
+    storage_path = paper["storage_path"] or ""
+
+    if storage_path:
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        bucket = os.getenv(
+            "SUPABASE_BUCKET",
+            "edusphere-papers"
+        )
+
+        if not supabase_url:
+            raise HTTPException(
+                status_code=500,
+                detail="Storage configuration missing"
+            )
+
+        safe_path = "/".join(
+            part for part in storage_path.split("/")
+            if part not in ("", ".", "..")
+        )
+
+        pdf_url = (
+            f"{supabase_url}/storage/v1/object/public/"
+            f"{bucket}/{safe_path}"
+        )
+
+    else:
+        pdf_url = (
+            paper["download_url"]
+            or paper["source_url"]
+            or ""
+        )
+
+    parsed = urlparse(pdf_url)
+
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in ("jeeadv.ac.in",)
+    ) and not storage_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Unapproved PDF source"
+        )
+
+    return RedirectResponse(
+        url=pdf_url,
+        status_code=302
+    )
+
+
+@app.get("/api/jee-advanced-papers/{paper_id}/download")
+def download_jee_advanced_pdf(paper_id: int):
+    """
+    Provides the PDF download destination.
+    The browser's PDF viewer supplies its download control.
+    """
+
+    return view_jee_advanced_pdf(paper_id)
