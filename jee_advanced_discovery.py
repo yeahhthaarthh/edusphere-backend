@@ -6,14 +6,21 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
 ARCHIVE_URL = "https://jeeadv.ac.in/archive.html"
 OFFICIAL_URL = "https://jeeadv.ac.in/"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 EduSpherePaperDiscovery/2.0"
+    "User-Agent": "Mozilla/5.0 EduSpherePaperDiscovery/3.0"
 }
 
-EXCLUDED = (
+REQUEST_TIMEOUT = 25
+
+EXCLUDED_TERMS = (
     "aat",
     "answer key",
     "answer-key",
@@ -26,23 +33,95 @@ EXCLUDED = (
 )
 
 
+# Verified organising institute records for past JEE Advanced years.
+# Unknown future years are detected from official announcements.
+
+ORGANIZING_INSTITUTES = {
+    2007: "IIT Bombay",
+    2008: "IIT Roorkee",
+    2009: "IIT Guwahati",
+    2010: "IIT Madras",
+    2011: "IIT Kanpur",
+    2012: "IIT Delhi",
+    2013: "IIT Delhi",
+    2014: "IIT Kharagpur",
+    2015: "IIT Bombay",
+    2016: "IIT Guwahati",
+    2017: "IIT Madras",
+    2018: "IIT Kanpur",
+    2019: "IIT Roorkee",
+    2020: "IIT Delhi",
+    2021: "IIT Kharagpur",
+    2022: "IIT Bombay",
+    2023: "IIT Guwahati",
+    2024: "IIT Madras",
+    2025: "IIT Kanpur",
+    2026: "IIT Roorkee",
+}
+
+EXAM_DATES = {
+    2026: "2026-05-17",
+}
+
+
+# =========================================================
+# WEBPAGE FETCHING
+# =========================================================
+
 def fetch_soup(url):
     try:
         response = requests.get(
-            url, headers=HEADERS, timeout=25
+            url,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT
         )
+
         response.raise_for_status()
-        return BeautifulSoup(response.text, "html.parser")
-    except requests.RequestException:
+
+        return BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+    except requests.RequestException as error:
+        print(f"EduSphere discovery fetch error: {error}")
         return None
 
 
+# =========================================================
+# ORGANISING INSTITUTE DETECTION
+# =========================================================
 
-def detect_organizing_institute(year, soup=None, page_url=""):
+def normalize_institute(name):
+    if not name:
+        return ""
+
+    name = re.sub(
+        r"^Indian Institute of Technology",
+        "IIT",
+        name.strip(),
+        flags=re.IGNORECASE
+    )
+
+    name = re.sub(r"\s+", " ", name)
+    name = name.strip(" .,:;|-")
+
+    return name
+
+
+def detect_organizing_institute(
+    year,
+    soup=None,
+    page_url=""
+):
     """
-    Detect the organising IIT from official JEE Advanced pages.
-    Never guess an institute if an official announcement is absent.
+    First use a verified historical record.
+    For an unknown year, inspect the official announcement.
+    Never guess an institute.
     """
+
+    if year in ORGANIZING_INSTITUTES:
+        return ORGANIZING_INSTITUTES[year]
 
     if soup is None and page_url:
         soup = fetch_soup(page_url)
@@ -53,43 +132,36 @@ def detect_organizing_institute(year, soup=None, page_url=""):
     text = soup.get_text(" ", strip=True)
 
     patterns = [
-        r"Organizing Institute\s*[:\-–]\s*"
+        r"(?:Organizing|Organising)\s+Institute"
+        r"\s*[:\-–]\s*"
         r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
 
-        r"Organising Institute\s*[:\-–]\s*"
+        r"(?:conducted|organized|organised)\s+by\s+"
         r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
 
-        r"(?:conducted|organised|organized)\s+by\s+"
-        r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
-
-        r"(?:JEE Advanced|Joint Entrance Examination Advanced)"
-        r"\s+" + str(year) + r".{0,100}?"
-        r"(?:IIT|Indian Institute of Technology)\s+"
-        r"([A-Za-z ]+)"
+        r"JEE\s+Advanced\s+" + str(year)
+        + r".{0,150}?"
+        + r"(Indian Institute of Technology\s+[A-Za-z ]+|IIT\s+[A-Za-z ]+)",
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE
+        )
 
         if not match:
             continue
 
-        institute = match.group(1).strip()
+        institute = normalize_institute(match.group(1))
 
+        # Prevent unrelated text from being accepted.
         institute = re.split(
-            r"[|.;,\n]",
+            r"[,.;|()]",
             institute,
             maxsplit=1
         )[0].strip()
-
-        institute = re.sub(
-            r"^Indian Institute of Technology",
-            "IIT",
-            institute,
-            flags=re.IGNORECASE
-        )
-
-        institute = re.sub(r"\s+", " ", institute).strip()
 
         if institute.upper().startswith("IIT "):
             return institute
@@ -97,9 +169,17 @@ def detect_organizing_institute(year, soup=None, page_url=""):
     return ""
 
 
-def excluded(text):
+# =========================================================
+# PAPER CLASSIFICATION
+# =========================================================
+
+def is_excluded(text):
     value = text.lower()
-    return any(term in value for term in EXCLUDED)
+
+    return any(
+        term in value
+        for term in EXCLUDED_TERMS
+    )
 
 
 def detect_stage(text, year):
@@ -111,17 +191,32 @@ def detect_stage(text, year):
     if "mains" in value or "main paper" in value:
         return "Mains"
 
-    match = re.search(r"paper\s*[- ]?([12])", value)
+    match = re.search(
+        r"paper\s*[- ]?([12])",
+        value
+    )
+
     if match:
         return f"Paper {match.group(1)}"
 
-    return "IIT-JEE Paper" if year <= 2006 else "Paper 1"
+    if year <= 2006:
+        return "IIT-JEE Paper"
+
+    return "Paper 1"
 
 
 def detect_language(text):
     value = text.lower()
-    return "Hindi" if "hindi" in value else "English"
 
+    if "hindi" in value:
+        return "Hindi"
+
+    return "English"
+
+
+# =========================================================
+# RECORD CREATION
+# =========================================================
 
 def make_record(
     year,
@@ -134,16 +229,30 @@ def make_record(
     exam_date="",
     organizing_institute=""
 ):
-    exam_name = "JEE Advanced" if year >= 2007 else "IIT-JEE"
+    exam_name = (
+        "JEE Advanced"
+        if year >= 2007
+        else "IIT-JEE"
+    )
+
     if not organizing_institute:
-    organizing_institute = ORGANIZING_INSTITUTES.get(year, "")
+        organizing_institute = (
+            ORGANIZING_INSTITUTES.get(year, "")
+        )
+
+    if not exam_date:
+        exam_date = EXAM_DATES.get(year, "")
+
     return {
         "year": year,
         "exam_date": exam_date,
         "paper_type": stage,
         "language": language,
         "document_type": "Question Paper",
-        "title": f"{exam_name} {year} {stage} ({language})",
+        "title": (
+            f"{exam_name} {year} "
+            f"{stage} ({language})"
+        ),
         "source_url": url,
         "download_url": url,
         "storage_path": "",
@@ -158,39 +267,65 @@ def make_record(
     }
 
 
+# =========================================================
+# OFFICIAL ARCHIVE DISCOVERY: 2007–2025
+# =========================================================
+
 def discover_official_papers():
     soup = fetch_soup(ARCHIVE_URL)
+
     if soup is None:
         return []
 
     records = []
+    seen = set()
 
     for anchor in soup.find_all("a", href=True):
+
         text = anchor.get_text(" ", strip=True)
-        href = urljoin(ARCHIVE_URL, anchor["href"])
-        context = anchor.parent.get_text(" ", strip=True)
+
+        context = anchor.parent.get_text(
+            " ",
+            strip=True
+        )
+
+        href = urljoin(
+            ARCHIVE_URL,
+            anchor["href"]
+        )
+
         combined = f"{text} {context} {href}"
 
-        if excluded(combined):
+        if is_excluded(combined):
             continue
 
         if not urlparse(href).path.lower().endswith(".pdf"):
             continue
 
         year_match = re.search(
-            r"\b(2007|2008|2009|20[1-2]\d)\b",
+            r"\b(200[7-9]|201\d|202[0-5])\b",
             combined
         )
+
         if not year_match:
             continue
 
         year = int(year_match.group(1))
-        if year > 2025:
-            continue
 
-        stage = detect_stage(combined, year)
+        stage = detect_stage(
+            combined,
+            year
+        )
+
         if stage not in ("Paper 1", "Paper 2"):
             continue
+
+        if href in seen:
+            continue
+
+        seen.add(href)
+
+        institute = detect_organizing_institute(year)
 
         records.append(
             make_record(
@@ -200,110 +335,201 @@ def discover_official_papers():
                 url=href,
                 page=ARCHIVE_URL,
                 authority="JEE Advanced Official",
-                status="official_source_link"
+                status="official_source_link",
+                organizing_institute=institute
             )
         )
 
     return records
 
 
-def discover_2026_papers():
+# =========================================================
+# CURRENT OFFICIAL WEBSITE DISCOVERY
+# =========================================================
+
+def discover_current_official_papers():
+    """
+    Detect the current exam year and its Paper 1/Paper 2
+    English/Hindi PDFs from the official homepage.
+    """
+
     soup = fetch_soup(OFFICIAL_URL)
+
     if soup is None:
         return []
+
+    page_text = soup.get_text(" ", strip=True)
+
+    year_matches = re.findall(
+        r"JEE\s+Advanced\s+(20\d{2})",
+        page_text,
+        flags=re.IGNORECASE
+    )
+
+    if not year_matches:
+        return []
+
+    year = max(
+        int(value)
+        for value in year_matches
+    )
+
+    if year < 2007:
+        return []
+
+    institute = detect_organizing_institute(
+        year=year,
+        soup=soup,
+        page_url=OFFICIAL_URL
+    )
 
     records = []
     seen = set()
 
-    institute = detect_organizing_institute(
-        2026, soup=soup, page_url=OFFICIAL_URL
-    )
-
     for anchor in soup.find_all("a", href=True):
-        href = urljoin(OFFICIAL_URL, anchor["href"])
-        filename = urlparse(href).path.rsplit("/", 1)[-1].lower()
+
+        href = urljoin(
+            OFFICIAL_URL,
+            anchor["href"]
+        )
+
+        filename = urlparse(href).path.rsplit(
+            "/",
+            1
+        )[-1].lower()
 
         match = re.fullmatch(
             r"p([12])_(english|hindi)\.pdf",
             filename
         )
 
-        if not match or href in seen:
+        if not match:
+            continue
+
+        if href in seen:
             continue
 
         seen.add(href)
 
+        paper_number = match.group(1)
+        language = match.group(2).capitalize()
+
         records.append(
             make_record(
-                year=2026,
-                stage=f"Paper {match.group(1)}",
-                language=match.group(2).capitalize(),
+                year=year,
+                stage=f"Paper {paper_number}",
+                language=language,
                 url=href,
                 page=OFFICIAL_URL,
                 authority="JEE Advanced Official",
                 status="official_source_link",
-                exam_date="2026-05-17",
-                organizing_institute="IIT Roorkee"
+                exam_date=EXAM_DATES.get(year, ""),
+                organizing_institute=institute
             )
         )
 
     return records
 
 
+# =========================================================
+# MAIN DISCOVERY FUNCTION
+# =========================================================
+
 def discover_jee_advanced_papers():
+
     records = []
-    records.extend(discover_official_papers())
-    records.extend(discover_2026_papers())
 
-    unique = {}
+    records.extend(
+        discover_official_papers()
+    )
+
+    records.extend(
+        discover_current_official_papers()
+    )
+
+    unique_records = {}
+
     for record in records:
-        unique[record["source_url"]] = record
+        unique_records[
+            record["source_url"]
+        ] = record
 
-    return list(unique.values())
+    return list(unique_records.values())
 
+
+# =========================================================
+# DATABASE SYNCHRONIZATION
+# =========================================================
 
 def sync_jee_advanced_papers():
+
     records = discover_jee_advanced_papers()
 
     if not records:
         return {
             "success": False,
-            "message": "No official paper links found.",
+            "message": (
+                "No official JEE Advanced PDF links found."
+            ),
             "discovered": 0,
-            "inserted": 0,
-            "updated": 0
+            "synced": 0
         }
 
+    # Imported only when this function runs.
+    # This avoids circular import problems.
     from app import connect
 
-    inserted = 0
-    updated = 0
+    synced = 0
 
     with connect() as db:
         with db.cursor() as cur:
+
             for record in records:
+
                 now = int(time.time())
 
                 cur.execute(
                     """
                     INSERT INTO jee_advanced_papers (
-                        year, exam_date, paper_type, language,
-                        document_type, title, source_url,
-                        source_page, source_authority,
-                        verification_status, created_at,
-                        updated_at, exam_name, stage,
-                        organizing_institute, exam_session,
-                        download_url, storage_path, download_mode
+                        year,
+                        exam_date,
+                        paper_type,
+                        language,
+                        document_type,
+                        title,
+                        source_url,
+                        source_page,
+                        source_authority,
+                        verification_status,
+                        created_at,
+                        updated_at,
+                        exam_name,
+                        stage,
+                        organizing_institute,
+                        exam_session,
+                        download_url,
+                        storage_path,
+                        download_mode
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s
                     )
-                    ON CONFLICT (source_url) DO UPDATE SET
-                        download_url = EXCLUDED.download_url,
-                        download_mode = EXCLUDED.download_mode,
-                        updated_at = EXCLUDED.updated_at
-                    RETURNING (xmax = 0) AS was_inserted
+                    ON CONFLICT (source_url)
+                    DO UPDATE SET
+                        organizing_institute =
+                            CASE
+                                WHEN EXCLUDED.organizing_institute <> ''
+                                THEN EXCLUDED.organizing_institute
+                                ELSE jee_advanced_papers.organizing_institute
+                            END,
+                        download_url =
+                            EXCLUDED.download_url,
+                        download_mode =
+                            EXCLUDED.download_mode,
+                        updated_at =
+                            EXCLUDED.updated_at
                     """,
                     (
                         record["year"],
@@ -328,16 +554,13 @@ def sync_jee_advanced_papers():
                     )
                 )
 
-                result = cur.fetchone()
-                if result and result["was_inserted"]:
-                    inserted += 1
-                else:
-                    updated += 1
+                synced += 1
 
     return {
         "success": True,
-        "message": "JEE Advanced PDF links synced.",
+        "message": (
+            "JEE Advanced official paper sync completed."
+        ),
         "discovered": len(records),
-        "inserted": inserted,
-        "updated": updated
+        "synced": synced
     }
