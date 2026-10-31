@@ -266,7 +266,7 @@ def make_record(
 
     exam_name = (
         "JEE Advanced"
-        if year >= 2007
+        if year >= 2013
         else "IIT-JEE"
     )
 
