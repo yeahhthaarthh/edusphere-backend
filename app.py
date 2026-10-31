@@ -17,6 +17,10 @@ from jee_main_discovery import (
     discover_jee_main_papers,
     sync_jee_main_papers
 )
+from jee_advanced_discovery import (
+    discover_jee_advanced_papers,
+    sync_jee_advanced_papers
+)
 from pathlib import Path
 from typing import Optional
 
@@ -941,3 +945,7 @@ async def jee_main_sync(request: Request):
             status_code=500,
             detail=f"JEE Main sync failed: {str(e)}"
         )
+        from jee_advanced_discovery import (
+    discover_jee_advanced_papers,
+    sync_jee_advanced_papers
+)
