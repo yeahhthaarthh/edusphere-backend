@@ -1,4 +1,5 @@
-
+from urllib.parse import urljoin, urlparse
+import re
 import re
 import time
 import requests
@@ -39,7 +40,58 @@ def fetch_soup(url):
         return BeautifulSoup(response.text, "html.parser")
     except requests.RequestException:
         return None
+def detect_organizing_institute(year, soup=None, page_url=""):
+    """
+    Detect the organising IIT from an official JEE Advanced page.
+    Return an empty string if it cannot be verified.
+    """
 
+    if soup is None and page_url:
+        soup = fetch_soup(page_url)
+
+    if soup is None:
+        return ""
+
+    text = soup.get_text(" ", strip=True)
+
+    patterns = [
+        r"Organizing Institute\s*[:\-–]\s*"
+        r"(Indian Institute of Technology\s+[\w\s]+)",
+
+        r"Organising Institute\s*[:\-–]\s*"
+        r"(Indian Institute of Technology\s+[\w\s]+)",
+
+        r"Organizing Institute\s*[:\-–]\s*"
+        r"(IIT\s*[\w\s]+)",
+
+        r"Organising Institute\s*[:\-–]\s*"
+        r"(IIT\s*[\w\s]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+
+        if match:
+            institute = match.group(1).strip()
+
+            institute = re.split(
+                r"(?=Participating Institutes|Important Announcements|Contact Details)",
+                institute,
+                maxsplit=1,
+                flags=re.IGNORECASE
+            )[0].strip()
+
+            if institute:
+                institute = re.sub(
+                    r"^Indian Institute of Technology",
+                    "IIT",
+                    institute,
+                    flags=re.IGNORECASE
+                )
+
+                return institute
+
+    return ""
 
 def excluded(text):
     value = text.lower()
@@ -86,7 +138,8 @@ def make_record(
     page,
     authority,
     status,
-    exam_date=""
+    exam_date,
+    organising_institute=""
 ):
     return {
         "year": year,
@@ -103,7 +156,7 @@ def make_record(
             "JEE Advanced" if year >= 2007 else "IIT-JEE"
         ),
         "stage": stage,
-        "organizing_institute": "",
+        "organizing_institute": organizing_institute,
         "exam_session": ""
     }
 
@@ -194,17 +247,21 @@ def discover_2026_papers():
         paper_type = f"Paper {paper_number}"
 
         records.append(
-            make_record(
-                year=2026,
-                stage=paper_type,
-                language=language,
-                url=href,
-                page=url,
-                authority="JEE Advanced Official",
-                status="official_source_link",
-                exam_date="2026-05-17"
-            )
-        )
+      make_record(
+    year=2026,
+    stage=paper_type,
+    language=language,
+    url=href,
+    page=url,
+    authority="JEE Advanced Official",
+    status="official_source_link",
+    exam_date="2026-05-17",
+    organizing_institute=detect_organizing_institute(
+        year=2026,
+        soup=soup,
+        page_url=url
+    )
+)
 
     return records
 
