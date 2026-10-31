@@ -28,6 +28,7 @@ from jee_advanced_discovery import (
     discover_jee_advanced_papers,
     sync_jee_advanced_papers
 )
+from neet_discovery import discover_neet_papers, sync_neet_papers
 from pathlib import Path
 from typing import Optional
 
@@ -1061,3 +1062,17 @@ def download_jee_advanced_pdf(paper_id: int):
     """
 
     return view_jee_advanced_pdf(paper_id)
+@app.get("/api/admin/neet-discovery-test")
+def neet_discovery_test():
+    records = discover_neet_papers()
+
+    return {
+        "success": True,
+        "discovered": len(records),
+        "papers": records
+    }
+
+
+@app.post("/api/admin/neet-sync")
+def neet_sync():
+    return sync_neet_papers()
