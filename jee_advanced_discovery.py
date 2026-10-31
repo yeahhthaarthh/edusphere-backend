@@ -13,9 +13,10 @@ from bs4 import BeautifulSoup
 
 ARCHIVE_URL = "https://jeeadv.ac.in/archive.html"
 OFFICIAL_URL = "https://jeeadv.ac.in/"
+OFFICIAL_HOST = "jeeadv.ac.in"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 EduSpherePaperDiscovery/3.0"
+    "User-Agent": "Mozilla/5.0 EduSpherePaperDiscovery/4.0"
 }
 
 REQUEST_TIMEOUT = 25
@@ -31,10 +32,6 @@ EXCLUDED_TERMS = (
     "syllabus",
     "brochure",
 )
-
-
-# Verified organising institute records for past JEE Advanced years.
-# Unknown future years are detected from official announcements.
 
 ORGANIZING_INSTITUTES = {
     2007: "IIT Bombay",
@@ -69,6 +66,10 @@ EXAM_DATES = {
 # =========================================================
 
 def fetch_soup(url):
+    if not is_official_url(url):
+        print(f"Rejected non-official URL: {url}")
+        return None
+
     try:
         response = requests.get(
             url,
@@ -78,6 +79,10 @@ def fetch_soup(url):
 
         response.raise_for_status()
 
+        if not is_official_url(response.url):
+            print("Rejected redirected non-official URL.")
+            return None
+
         return BeautifulSoup(
             response.text,
             "html.parser"
@@ -86,6 +91,19 @@ def fetch_soup(url):
     except requests.RequestException as error:
         print(f"EduSphere discovery fetch error: {error}")
         return None
+
+
+def is_official_url(url):
+    try:
+        parsed = urlparse(url)
+
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == OFFICIAL_HOST
+        )
+
+    except (ValueError, TypeError):
+        return False
 
 
 # =========================================================
@@ -114,12 +132,6 @@ def detect_organizing_institute(
     soup=None,
     page_url=""
 ):
-    """
-    First use a verified historical record.
-    For an unknown year, inspect the official announcement.
-    Never guess an institute.
-    """
-
     if year in ORGANIZING_INSTITUTES:
         return ORGANIZING_INSTITUTES[year]
 
@@ -156,14 +168,17 @@ def detect_organizing_institute(
 
         institute = normalize_institute(match.group(1))
 
-        # Prevent unrelated text from being accepted.
         institute = re.split(
             r"[,.;|()]",
             institute,
             maxsplit=1
         )[0].strip()
 
-        if institute.upper().startswith("IIT "):
+        if re.fullmatch(
+            r"IIT\s+[A-Za-z ]+",
+            institute,
+            flags=re.IGNORECASE
+        ):
             return institute
 
     return ""
@@ -191,18 +206,19 @@ def detect_stage(text, year):
     if "mains" in value or "main paper" in value:
         return "Mains"
 
-    match = re.search(
-        r"paper\s*[- ]?([12])",
+    matches = re.findall(
+        r"\bpaper\s*[-_ ]?([12])\b",
         value
     )
 
-    if match:
-        return f"Paper {match.group(1)}"
+    if len(set(matches)) == 1:
+        return f"Paper {matches[0]}"
 
+    # Do not silently classify an ambiguous document as Paper 1.
     if year <= 2006:
         return "IIT-JEE Paper"
 
-    return "Paper 1"
+    return ""
 
 
 def detect_language(text):
@@ -210,6 +226,9 @@ def detect_language(text):
 
     if "hindi" in value:
         return "Hindi"
+
+    if "english" in value:
+        return "English"
 
     return "English"
 
@@ -229,6 +248,12 @@ def make_record(
     exam_date="",
     organizing_institute=""
 ):
+    if not is_official_url(url):
+        return None
+
+    if stage not in ("Paper 1", "Paper 2"):
+        return None
+
     exam_name = (
         "JEE Advanced"
         if year >= 2007
@@ -259,6 +284,8 @@ def make_record(
         "download_mode": "official_external",
         "source_page": page,
         "source_authority": authority,
+        "source_type": "official",
+        "source_label": "JEE Advanced Official Website",
         "verification_status": status,
         "exam_name": exam_name,
         "stage": stage,
@@ -294,6 +321,9 @@ def discover_official_papers():
             anchor["href"]
         )
 
+        if not is_official_url(href):
+            continue
+
         combined = f"{text} {context} {href}"
 
         if is_excluded(combined):
@@ -325,20 +355,19 @@ def discover_official_papers():
 
         seen.add(href)
 
-        institute = detect_organizing_institute(year)
-
-        records.append(
-            make_record(
-                year=year,
-                stage=stage,
-                language=detect_language(combined),
-                url=href,
-                page=ARCHIVE_URL,
-                authority="JEE Advanced Official",
-                status="official_source_link",
-                organizing_institute=institute
-            )
+        record = make_record(
+            year=year,
+            stage=stage,
+            language=detect_language(combined),
+            url=href,
+            page=ARCHIVE_URL,
+            authority="JEE Advanced Official",
+            status="official_source_link",
+            organizing_institute=detect_organizing_institute(year)
         )
+
+        if record:
+            records.append(record)
 
     return records
 
@@ -348,11 +377,6 @@ def discover_official_papers():
 # =========================================================
 
 def discover_current_official_papers():
-    """
-    Detect the current exam year and its Paper 1/Paper 2
-    English/Hindi PDFs from the official homepage.
-    """
-
     soup = fetch_soup(OFFICIAL_URL)
 
     if soup is None:
@@ -393,6 +417,9 @@ def discover_current_official_papers():
             anchor["href"]
         )
 
+        if not is_official_url(href):
+            continue
+
         filename = urlparse(href).path.rsplit(
             "/",
             1
@@ -414,19 +441,20 @@ def discover_current_official_papers():
         paper_number = match.group(1)
         language = match.group(2).capitalize()
 
-        records.append(
-            make_record(
-                year=year,
-                stage=f"Paper {paper_number}",
-                language=language,
-                url=href,
-                page=OFFICIAL_URL,
-                authority="JEE Advanced Official",
-                status="official_source_link",
-                exam_date=EXAM_DATES.get(year, ""),
-                organizing_institute=institute
-            )
+        record = make_record(
+            year=year,
+            stage=f"Paper {paper_number}",
+            language=language,
+            url=href,
+            page=OFFICIAL_URL,
+            authority="JEE Advanced Official",
+            status="official_source_link",
+            exam_date=EXAM_DATES.get(year, ""),
+            organizing_institute=institute
         )
+
+        if record:
+            records.append(record)
 
     return records
 
@@ -450,9 +478,7 @@ def discover_jee_advanced_papers():
     unique_records = {}
 
     for record in records:
-        unique_records[
-            record["source_url"]
-        ] = record
+        unique_records[record["source_url"]] = record
 
     return list(unique_records.values())
 
@@ -475,8 +501,6 @@ def sync_jee_advanced_papers():
             "synced": 0
         }
 
-    # Imported only when this function runs.
-    # This avoids circular import problems.
     from app import connect
 
     synced = 0
@@ -500,6 +524,8 @@ def sync_jee_advanced_papers():
                         source_url,
                         source_page,
                         source_authority,
+                        source_type,
+                        source_label,
                         verification_status,
                         created_at,
                         updated_at,
@@ -514,7 +540,7 @@ def sync_jee_advanced_papers():
                     VALUES (
                         %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (source_url)
                     DO UPDATE SET
@@ -524,10 +550,19 @@ def sync_jee_advanced_papers():
                                 THEN EXCLUDED.organizing_institute
                                 ELSE jee_advanced_papers.organizing_institute
                             END,
+
                         download_url =
                             EXCLUDED.download_url,
+
                         download_mode =
                             EXCLUDED.download_mode,
+
+                        source_type =
+                            EXCLUDED.source_type,
+
+                        source_label =
+                            EXCLUDED.source_label,
+
                         updated_at =
                             EXCLUDED.updated_at
                     """,
@@ -541,6 +576,8 @@ def sync_jee_advanced_papers():
                         record["source_url"],
                         record["source_page"],
                         record["source_authority"],
+                        record["source_type"],
+                        record["source_label"],
                         record["verification_status"],
                         now,
                         now,
