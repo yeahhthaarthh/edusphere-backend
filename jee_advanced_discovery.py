@@ -221,7 +221,11 @@ def discover_2026_papers():
 
     records = []
     seen = set()
-
+organizing_institute = detect_organizing_institute(
+    year=2026,
+    soup=soup,
+    page_url=url
+)
     for anchor in soup.find_all("a", href=True):
         href = urljoin(url, anchor["href"])
         path = urlparse(href).path.lower()
@@ -246,23 +250,19 @@ def discover_2026_papers():
 
         paper_type = f"Paper {paper_number}"
 
-        records.append(
-      make_record(
-    year=2026,
-    stage=paper_type,
-    language=language,
-    url=href,
-    page=url,
-    authority="JEE Advanced Official",
-    status="official_source_link",
-    exam_date="2026-05-17",
-    organizing_institute=detect_organizing_institute(
+      records.append(
+    make_record(
         year=2026,
-        soup=soup,
-        page_url=url
+        stage=paper_type,
+        language=language,
+        url=href,
+        page=url,
+        authority="JEE Advanced Official",
+        status="official_source_link",
+        exam_date="2026-05-17",
+        organizing_institute=organizing_institute
     )
 )
-
     return records
 
 
