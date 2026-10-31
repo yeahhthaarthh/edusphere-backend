@@ -1,43 +1,29 @@
 
 import re
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urldefrag
 
 import requests
 from bs4 import BeautifulSoup
 
 
 # ============================================================
-# NEET / AIPMT HISTORICAL QUESTION PAPER DISCOVERY
+# CONFIGURATION
 # ============================================================
 
-# NTA is the primary source.
-# Third-party sources are used only to discover additional papers.
-# Their records are always labelled third_party.
+START_YEAR = 2007
+END_YEAR = 2026
 
-SOURCES = [
-    {
-        "name": "NTA",
-        "url": "https://neet.nta.nic.in/archive/",
-        "authority": "NTA",
-        "type": "official",
-        "priority": 1,
-    },
-    {
-        "name": "AglaSem",
-        "url": "https://docs.aglasem.com/",
-        "authority": "AglaSem",
-        "type": "third_party",
-        "priority": 2,
-    },
-    {
-        "name": "ExamGOAL",
-        "url": "https://examgoal.com/",
-        "authority": "ExamGOAL",
-        "type": "third_party",
-        "priority": 3,
-    },
-]
+NTA_ARCHIVE = "https://neet.nta.nic.in/archive/"
+
+AGLASEM_ARCHIVE = (
+    "https://docs.aglasem.com/org/nta/neet-ug/question-paper"
+)
+
+EXAMGOAL_ARCHIVE = (
+    "https://pdf.questions.examgoal.com/"
+    "past-years/year-wise/medical/neet"
+)
 
 HEADERS = {
     "User-Agent": (
@@ -47,14 +33,14 @@ HEADERS = {
 }
 
 TIMEOUT = 25
-MAX_CHILD_PAGES_PER_SOURCE = 80
-REQUEST_DELAY = 0.25
+MAX_DETAIL_PAGES = 150
+REQUEST_DELAY = 0.2
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-# Only these domains are allowed for the corresponding sources.
-SOURCE_HOSTS = {
+# Hostnames allowed for each source and its known PDF CDN.
+ALLOWED_HOSTS = {
     "NTA": {
         "neet.nta.nic.in",
         "nta.ac.in",
@@ -64,6 +50,7 @@ SOURCE_HOSTS = {
         "aglasem.com",
         "www.aglasem.com",
         "docs.aglasem.com",
+        "admission.aglasem.com",
     },
     "ExamGOAL": {
         "examgoal.com",
@@ -104,14 +91,13 @@ EXCLUDED_TERMS = [
     "correction window",
 ]
 
-QUESTION_PAPER_TERMS = [
+PAPER_TERMS = [
     "question paper",
     "question papers",
     "question booklet",
     "question book",
     "neet qp",
     "aipmt qp",
-    "qp paper",
     "previous year paper",
     "previous years paper",
     "past year paper",
@@ -143,50 +129,38 @@ def clean_text(value):
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def host_of(url):
+def get_host(url):
     return (urlparse(url).hostname or "").lower()
 
 
-def is_allowed_host(url, source_name):
+def allowed_url(url, source):
     parsed = urlparse(url)
 
-    if parsed.scheme != "https":
-        return False
-
-    host = host_of(url)
-
-    return host in SOURCE_HOSTS.get(source_name, set())
+    return (
+        parsed.scheme == "https"
+        and get_host(url) in ALLOWED_HOSTS.get(source, set())
+    )
 
 
-def fetch_page(url, source_name):
-    if not is_allowed_host(url, source_name):
+def normalise_url(url):
+    url, _ = urldefrag(url)
+    return url.strip()
+
+
+def get_year(text):
+    if not text:
         return None
 
-    try:
-        response = SESSION.get(
-            url,
-            timeout=TIMEOUT,
-            allow_redirects=True,
-        )
+    matches = re.findall(
+        r"\b(200[7-9]|201\d|202[0-6])\b",
+        text,
+        re.I,
+    )
 
-        if not is_allowed_host(response.url, source_name):
-            print(f"[BLOCKED REDIRECT] {url}")
-            return None
-
-        response.raise_for_status()
-
-        content_type = response.headers.get(
-            "Content-Type", ""
-        ).lower()
-
-        if "text/html" not in content_type and "application/xhtml" not in content_type:
-            return None
-
-        return response
-
-    except requests.RequestException as exc:
-        print(f"[PAGE ERROR] {url}: {exc}")
+    if not matches:
         return None
+
+    return int(matches[0])
 
 
 def is_excluded(text):
@@ -195,19 +169,31 @@ def is_excluded(text):
     return any(term in text for term in EXCLUDED_TERMS)
 
 
-def get_year(text):
-    if not text:
-        return None
+def has_exam_name(text):
+    return bool(
+        re.search(r"\bneet\b|\baipmt\b", text or "", re.I)
+    )
 
-    matches = re.findall(r"\b(19\d{2}|20\d{2})\b", text)
 
-    for value in matches:
-        year = int(value)
+def has_question_paper_term(text):
+    text = clean_text(text).lower()
 
-        if 1988 <= year <= 2026:
-            return year
+    if "neet qp" in text or "aipmt qp" in text:
+        return True
 
-    return None
+    return any(term in text for term in PAPER_TERMS)
+
+
+def is_actual_question_paper(title, context=""):
+    text = clean_text(f"{title} {context}")
+
+    if not text or is_excluded(text):
+        return False
+
+    return (
+        has_exam_name(text)
+        and has_question_paper_term(text)
+    )
 
 
 def get_language(text):
@@ -220,26 +206,10 @@ def get_language(text):
     return "Unknown"
 
 
-def get_exam_code(text):
-    patterns = [
-        r"\bset\s*([A-Z0-9]{1,4})\b",
-        r"\bcode\s*([A-Z0-9]{1,5})\b",
-        r"\bbooklet\s*([A-Z0-9]{1,5})\b",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-
-        if match:
-            return match.group(1).upper()
-
-    return ""
-
-
 def get_exam_name(year, text):
     text = clean_text(text).lower()
 
-    if "aipmt" in text or (year and year < 2013):
+    if "aipmt" in text or (year and year <= 2015):
         return "AIPMT"
 
     return "NEET UG"
@@ -249,90 +219,113 @@ def get_exam_session(text):
     text = clean_text(text).lower()
 
     if any(term in text for term in [
-        "re-exam", "re exam", "retest", "re-test", "reneet"
+        "re-neet",
+        "re neet",
+        "re-exam",
+        "re exam",
+        "re-examination",
+        "re examination",
+        "retest",
     ]):
         return "Re-Examination"
+
+    if "cancelled" in text or "canceled" in text:
+        return "Cancelled Examination"
 
     if "manipur" in text:
         return "Manipur"
 
-    if "phase 2" in text:
+    if "phase 2" in text or "phase-2" in text:
         return "Phase 2"
 
-    if "phase 1" in text:
+    if "phase 1" in text or "phase-1" in text:
         return "Phase 1"
 
     if "odisha" in text:
         return "Odisha"
 
+    if "karnataka" in text:
+        return "Karnataka"
+
+    if "prelims" in text or "preliminary" in text:
+        return "Preliminary"
+
+    if "mains" in text:
+        return "Mains"
+
     return "Main Examination"
 
 
-# ============================================================
-# STRICT QUESTION PAPER VALIDATION
-# ============================================================
+def get_exam_code(text):
+    patterns = [
+        r"\bset\s*([A-Z0-9]{1,4})\b",
+        r"\bcode\s*([A-Z0-9]{1,5})\b",
+        r"\bbooklet\s*([A-Z0-9]{1,5})\b",
+    ]
 
-def is_actual_question_paper(title, context=""):
-    """
-    A record must contain:
-    - NEET or AIPMT identification
-    - Explicit question-paper evidence
-    - No excluded document terms
-    """
+    for pattern in patterns:
+        match = re.search(pattern, text or "", re.I)
 
-    combined = clean_text(f"{title} {context}")
-    text = combined.lower()
+        if match:
+            return match.group(1).upper()
 
-    if not text or is_excluded(text):
-        return False
-
-    exam_found = bool(
-        re.search(r"\bneet\b", text)
-        or re.search(r"\baipmt\b", text)
-    )
-
-    paper_found = any(
-        term in text
-        for term in QUESTION_PAPER_TERMS
-    )
-
-    # NTA archive sometimes uses labels like:
-    # "English Set E1 NEET QP 2020"
-    if re.search(r"\bneet\s+qp\b", text):
-        paper_found = True
-
-    if re.search(r"\baipmt\s+qp\b", text):
-        paper_found = True
-
-    return exam_found and paper_found
+    return ""
 
 
 # ============================================================
-# PDF VALIDATION
+# HTTP HELPERS
 # ============================================================
 
-def is_direct_pdf_url(url):
+def fetch_html(url, source):
+    if not allowed_url(url, source):
+        return None
+
+    try:
+        response = SESSION.get(
+            url,
+            timeout=TIMEOUT,
+            allow_redirects=True,
+        )
+
+        if not allowed_url(response.url, source):
+            print("[BLOCKED REDIRECT]", response.url)
+            return None
+
+        response.raise_for_status()
+
+        content_type = response.headers.get(
+            "Content-Type", ""
+        ).lower()
+
+        if "html" not in content_type:
+            return None
+
+        return BeautifulSoup(response.text, "html.parser")
+
+    except requests.RequestException as exc:
+        print(f"[HTML ERROR] {url}: {exc}")
+        return None
+
+
+def is_pdf_url(url):
     if not url:
         return False
 
-    parsed = urlparse(url)
-
-    if parsed.scheme != "https":
-        return False
+    path = urlparse(url).path.lower()
 
     return (
-        parsed.path.lower().endswith(".pdf")
-        or ".pdf" in parsed.path.lower()
+        path.endswith(".pdf")
+        or path.endswith(".pdf/")
     )
 
 
-def verify_pdf(url, source_name):
+def verify_pdf(url, source):
     """
-    Checks whether the URL actually returns PDF bytes.
-    Does not download the entire file.
+    Check the PDF header using a small ranged request.
+    This avoids downloading the complete PDF during discovery.
     """
 
-    if not is_allowed_host(url, source_name):
+    if not allowed_url(url, source):
         return False
 
     try:
@@ -344,7 +337,7 @@ def verify_pdf(url, source_name):
             stream=True,
         )
 
-        if not is_allowed_host(response.url, source_name):
+        if not allowed_url(response.url, source):
             response.close()
             return False
 
@@ -366,7 +359,7 @@ def verify_pdf(url, source_name):
 
 
 # ============================================================
-# DATABASE RECORD
+# RECORD CREATION
 # ============================================================
 
 def make_record(
@@ -374,31 +367,30 @@ def make_record(
     pdf_url,
     source_page,
     source_name,
-    authority,
     source_type,
     context="",
 ):
     title = clean_text(title)
     context = clean_text(context)
 
-    combined_text = clean_text(f"{title} {context}")
+    combined = clean_text(f"{title} {context}")
 
     if not is_actual_question_paper(title, context):
         return None
 
-    if not is_direct_pdf_url(pdf_url):
+    year = get_year(combined)
+
+    if not year or not START_YEAR <= year <= END_YEAR:
         return None
 
-    if not is_allowed_host(pdf_url, source_name):
+    if not is_pdf_url(pdf_url):
         return None
 
-    year = get_year(combined_text)
-
-    if not year:
+    if not allowed_url(pdf_url, source_name):
         return None
 
     if not verify_pdf(pdf_url, source_name):
-        print(f"[NOT A VERIFIED PDF] {pdf_url}")
+        print("[INVALID PDF]", pdf_url)
         return None
 
     official = source_type == "official"
@@ -407,13 +399,17 @@ def make_record(
         "year": year,
         "exam_date": "",
         "paper_type": "Question Paper",
-        "language": get_language(combined_text),
+        "language": get_language(combined),
         "document_type": "Question Paper",
         "title": title,
         "source_url": pdf_url,
         "source_page": source_page,
-        "source_authority": authority,
-        "source_type": "official" if official else "third_party",
+        "source_authority": (
+            "NTA" if official else source_name
+        ),
+        "source_type": (
+            "official" if official else "third_party"
+        ),
         "source_label": (
             "Official NTA PDF"
             if official
@@ -426,37 +422,33 @@ def make_record(
         ),
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
-        "exam_name": get_exam_name(year, combined_text),
-        "exam_session": get_exam_session(combined_text),
-        "exam_code": get_exam_code(combined_text),
+        "exam_name": get_exam_name(year, combined),
+        "exam_session": get_exam_session(combined),
+        "exam_code": get_exam_code(combined),
         "download_url": pdf_url,
         "storage_path": "",
         "download_mode": (
-            "official_external"
-            if official
-            else "external"
+            "official_external" if official else "external"
         ),
     }
 
 
 # ============================================================
-# NTA ARCHIVE
+# NTA ARCHIVE DISCOVERY
 # ============================================================
 
 def discover_nta():
     records = []
-    source = SOURCES[0]
 
-    response = fetch_page(source["url"], source["name"])
+    soup = fetch_html(NTA_ARCHIVE, "NTA")
 
-    if not response:
-        print("[NTA] Archive could not be accessed.")
+    if not soup:
+        print("[NTA] Archive unavailable")
         return records
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    seen = set()
 
-    # First inspect table rows. This captures title and PDF link
-    # from the same archive entry.
+    # Table rows contain the title and the PDF link.
     for row in soup.find_all("tr"):
         row_text = clean_text(row.get_text(" ", strip=True))
 
@@ -464,29 +456,33 @@ def discover_nta():
             continue
 
         for anchor in row.find_all("a", href=True):
-            pdf_url = urljoin(source["url"], anchor["href"])
+            pdf_url = normalise_url(
+                urljoin(NTA_ARCHIVE, anchor["href"])
+            )
 
-            if not is_direct_pdf_url(pdf_url):
+            if not is_pdf_url(pdf_url):
                 continue
 
             record = make_record(
                 title=row_text,
                 pdf_url=pdf_url,
-                source_page=source["url"],
-                source_name=source["name"],
-                authority=source["authority"],
-                source_type=source["type"],
+                source_page=NTA_ARCHIVE,
+                source_name="NTA",
+                source_type="official",
                 context=row_text,
             )
 
-            if record:
+            if record and pdf_url not in seen:
+                seen.add(pdf_url)
                 records.append(record)
 
-    # Also inspect non-table archive entries.
+    # Fallback for archive entries not rendered in table rows.
     for anchor in soup.find_all("a", href=True):
-        pdf_url = urljoin(source["url"], anchor["href"])
+        pdf_url = normalise_url(
+            urljoin(NTA_ARCHIVE, anchor["href"])
+        )
 
-        if not is_direct_pdf_url(pdf_url):
+        if not is_pdf_url(pdf_url) or pdf_url in seen:
             continue
 
         anchor_text = clean_text(
@@ -497,98 +493,90 @@ def discover_nta():
             anchor.parent.get_text(" ", strip=True)
         )
 
-        context = clean_text(f"{anchor_text} {parent_text}")
-
-        if not is_actual_question_paper(anchor_text, context):
-            continue
+        context = clean_text(
+            f"{anchor_text} {parent_text}"
+        )
 
         record = make_record(
             title=context,
             pdf_url=pdf_url,
-            source_page=source["url"],
-            source_name=source["name"],
-            authority=source["authority"],
-            source_type=source["type"],
+            source_page=NTA_ARCHIVE,
+            source_name="NTA",
+            source_type="official",
             context=context,
         )
 
         if record:
+            seen.add(pdf_url)
             records.append(record)
 
     return records
 
 
 # ============================================================
-# THIRD-PARTY SOURCE CRAWLER
+# AGLASEM DISCOVERY
 # ============================================================
 
-def discover_third_party(source):
+def discover_aglasem():
     records = []
+    soup = fetch_html(AGLASEM_ARCHIVE, "AglaSem")
 
-    source_name = source["name"]
-    start_url = source["url"]
-
-    response = fetch_page(start_url, source_name)
-
-    if not response:
-        print(f"[{source_name}] Source page unavailable.")
+    if not soup:
+        print("[AglaSem] Archive unavailable")
         return records
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    detail_pages = {}
 
-    visited_pages = set()
-    candidate_pages = set()
-
-    # Find relevant NEET/AIPMT paper pages.
     for anchor in soup.find_all("a", href=True):
-        href = urljoin(start_url, anchor["href"])
-        anchor_text = clean_text(
+        page_url = normalise_url(
+            urljoin(AGLASEM_ARCHIVE, anchor["href"])
+        )
+
+        text = clean_text(
             anchor.get_text(" ", strip=True)
         )
 
-        if not is_allowed_host(href, source_name):
-            continue
-
-        if is_direct_pdf_url(href):
-            continue
-
         context = clean_text(
-            f"{anchor_text} {anchor.parent.get_text(' ', strip=True)}"
+            f"{text} {anchor.parent.get_text(' ', strip=True)}"
         )
-
-        if is_excluded(context):
-            continue
 
         year = get_year(context)
 
-        has_exam = bool(
-            re.search(r"\bneet\b|\baipmt\b", context, re.I)
-        )
-
-        has_paper_term = any(
-            term in context.lower()
-            for term in QUESTION_PAPER_TERMS
-        )
-
-        if year and has_exam and has_paper_term:
-            candidate_pages.add(href)
-
-    # Inspect relevant paper pages.
-    for page_url in list(candidate_pages)[:MAX_CHILD_PAGES_PER_SOURCE]:
-        if page_url in visited_pages:
+        if not year or not START_YEAR <= year <= END_YEAR:
             continue
 
-        visited_pages.add(page_url)
-
-        page_response = fetch_page(page_url, source_name)
-
-        if not page_response:
+        if not has_exam_name(context):
             continue
 
-        page_soup = BeautifulSoup(
-            page_response.text,
-            "html.parser",
-        )
+        if not has_question_paper_term(context):
+            continue
+
+        if not allowed_url(page_url, "AglaSem"):
+            continue
+
+        if is_pdf_url(page_url):
+            record = make_record(
+                title=context,
+                pdf_url=page_url,
+                source_page=AGLASEM_ARCHIVE,
+                source_name="AglaSem",
+                source_type="third_party",
+                context=context,
+            )
+
+            if record:
+                records.append(record)
+        else:
+            detail_pages[page_url] = context
+
+    for page_url, listing_context in list(
+        detail_pages.items()
+    )[:MAX_DETAIL_PAGES]:
+
+        page_soup = fetch_html(page_url, "AglaSem")
+
+        if not page_soup:
+            continue
 
         page_title = clean_text(
             page_soup.title.get_text(" ", strip=True)
@@ -600,20 +588,19 @@ def discover_third_party(source):
             page_soup.get_text(" ", strip=True)
         )
 
-        page_context = clean_text(
-            f"{page_title} {page_text[:2500]}"
+        context = clean_text(
+            f"{listing_context} {page_title} {page_text[:3000]}"
         )
 
-        if is_excluded(page_title):
-            continue
-
-        if not is_actual_question_paper(page_title, page_context):
+        if not is_actual_question_paper(page_title, context):
             continue
 
         for anchor in page_soup.find_all("a", href=True):
-            pdf_url = urljoin(page_url, anchor["href"])
+            pdf_url = normalise_url(
+                urljoin(page_url, anchor["href"])
+            )
 
-            if not is_direct_pdf_url(pdf_url):
+            if not is_pdf_url(pdf_url):
                 continue
 
             link_text = clean_text(
@@ -621,13 +608,14 @@ def discover_third_party(source):
             )
 
             record = make_record(
-                title=page_title or link_text,
+                title=page_title or listing_context,
                 pdf_url=pdf_url,
                 source_page=page_url,
-                source_name=source_name,
-                authority=source["authority"],
-                source_type=source["type"],
-                context=page_context,
+                source_name="AglaSem",
+                source_type="third_party",
+                context=clean_text(
+                    f"{context} {link_text}"
+                ),
             )
 
             if record:
@@ -635,33 +623,124 @@ def discover_third_party(source):
 
         time.sleep(REQUEST_DELAY)
 
-    # Also inspect direct PDFs linked on the original catalogue.
+    return records
+
+
+# ============================================================
+# EXAMGOAL DISCOVERY
+# ============================================================
+
+def discover_examgoal():
+    records = []
+
+    soup = fetch_html(EXAMGOAL_ARCHIVE, "ExamGOAL")
+
+    if not soup:
+        print("[ExamGOAL] Archive unavailable")
+        return records
+
+    detail_pages = {}
+
+    # First collect all year and paper pages.
     for anchor in soup.find_all("a", href=True):
-        pdf_url = urljoin(start_url, anchor["href"])
+        page_url = normalise_url(
+            urljoin(EXAMGOAL_ARCHIVE, anchor["href"])
+        )
 
-        if not is_direct_pdf_url(pdf_url):
-            continue
-
-        link_text = clean_text(
+        anchor_text = clean_text(
             anchor.get_text(" ", strip=True)
         )
 
         context = clean_text(
-            f"{link_text} {anchor.parent.get_text(' ', strip=True)}"
+            f"{anchor_text} {anchor.parent.get_text(' ', strip=True)}"
         )
 
-        record = make_record(
-            title=context,
-            pdf_url=pdf_url,
-            source_page=start_url,
-            source_name=source_name,
-            authority=source["authority"],
-            source_type=source["type"],
-            context=context,
+        year = get_year(context)
+
+        if not year or not START_YEAR <= year <= END_YEAR:
+            continue
+
+        if not has_exam_name(context):
+            continue
+
+        if is_excluded(context):
+            continue
+
+        if not allowed_url(page_url, "ExamGOAL"):
+            continue
+
+        if is_pdf_url(page_url):
+            if not has_question_paper_term(context):
+                continue
+
+            record = make_record(
+                title=context,
+                pdf_url=page_url,
+                source_page=EXAMGOAL_ARCHIVE,
+                source_name="ExamGOAL",
+                source_type="third_party",
+                context=context,
+            )
+
+            if record:
+                records.append(record)
+        else:
+            detail_pages[page_url] = context
+
+    # Inspect individual pages for direct PDF links.
+    for page_url, listing_context in list(
+        detail_pages.items()
+    )[:MAX_DETAIL_PAGES]:
+
+        page_soup = fetch_html(page_url, "ExamGOAL")
+
+        if not page_soup:
+            continue
+
+        page_title = clean_text(
+            page_soup.title.get_text(" ", strip=True)
+            if page_soup.title
+            else ""
         )
 
-        if record:
-            records.append(record)
+        page_text = clean_text(
+            page_soup.get_text(" ", strip=True)
+        )
+
+        context = clean_text(
+            f"{listing_context} {page_title} {page_text[:3000]}"
+        )
+
+        if not is_actual_question_paper(page_title, context):
+            continue
+
+        for anchor in page_soup.find_all("a", href=True):
+            pdf_url = normalise_url(
+                urljoin(page_url, anchor["href"])
+            )
+
+            if not is_pdf_url(pdf_url):
+                continue
+
+            link_text = clean_text(
+                anchor.get_text(" ", strip=True)
+            )
+
+            record = make_record(
+                title=page_title or listing_context,
+                pdf_url=pdf_url,
+                source_page=page_url,
+                source_name="ExamGOAL",
+                source_type="third_party",
+                context=clean_text(
+                    f"{context} {link_text}"
+                ),
+            )
+
+            if record:
+                records.append(record)
+
+        time.sleep(REQUEST_DELAY)
 
     return records
 
@@ -673,39 +752,30 @@ def discover_third_party(source):
 def discover_neet_papers():
     all_records = []
 
-    # NTA first.
-    print("\n========== NTA SEARCH ==========")
+    sources = [
+        ("NTA", discover_nta),
+        ("AglaSem", discover_aglasem),
+        ("ExamGOAL", discover_examgoal),
+    ]
 
-    try:
-        nta_records = discover_nta()
-        print(f"[NTA] Valid papers: {len(nta_records)}")
-        all_records.extend(nta_records)
-    except Exception as exc:
-        print(f"[NTA ERROR] {exc}")
-
-    # Third-party sources.
-    for source in SOURCES:
-        if source["type"] != "third_party":
-            continue
-
-        print(f"\n========== {source['name']} SEARCH ==========")
+    for name, function in sources:
+        print(f"\n========== SEARCHING {name} ==========")
 
         try:
-            found = discover_third_party(source)
-            print(f"[{source['name']}] Valid papers: {len(found)}")
+            found = function()
+            print(f"[{name}] Verified papers: {len(found)}")
             all_records.extend(found)
-        except Exception as exc:
-            print(f"[{source['name']} ERROR] {exc}")
 
-    # Deduplicate by URL.
+        except Exception as exc:
+            print(f"[{name} ERROR] {exc}")
+
+    # Deduplicate exact PDF URLs.
     unique = {}
 
     for record in all_records:
-        url = record["source_url"].split("#")[0]
+        url = normalise_url(record["source_url"])
 
-        existing = unique.get(url)
-
-        if existing is None:
+        if url not in unique:
             unique[url] = record
 
         elif record["source_type"] == "official":
@@ -713,31 +783,17 @@ def discover_neet_papers():
 
     results = list(unique.values())
 
-    # Official records first, then newest years.
+    # Prefer official records, then latest years.
     results.sort(
         key=lambda item: (
             item["source_type"] != "official",
             -item["year"],
             item["language"],
-            item["exam_code"],
+            item["exam_session"],
         )
     )
 
-    print("\n========== DISCOVERY SUMMARY ==========")
-    print(f"Total unique papers: {len(results)}")
-
-    print(
-        "Official NTA papers:",
-        sum(r["source_type"] == "official" for r in results),
-    )
-
-    print(
-        "Third-party papers:",
-        sum(r["source_type"] == "third_party" for r in results),
-    )
-
-    print("\nYear-wise distribution:")
-
+    # Print year-wise coverage.
     year_counts = {}
 
     for record in results:
@@ -745,8 +801,32 @@ def discover_neet_papers():
             year_counts.get(record["year"], 0) + 1
         )
 
-    for year in sorted(year_counts):
-        print(f"{year}: {year_counts[year]}")
+    print("\n========== NEET DISCOVERY SUMMARY ==========")
+
+    print("Total unique PDFs:", len(results))
+
+    print(
+        "Official PDFs:",
+        sum(r["source_type"] == "official" for r in results),
+    )
+
+    print(
+        "Third-party PDFs:",
+        sum(r["source_type"] == "third_party" for r in results),
+    )
+
+    print("\nYear-wise PDF counts:")
+
+    for year in range(START_YEAR, END_YEAR + 1):
+        print(f"{year}: {year_counts.get(year, 0)}")
+
+    missing = [
+        year
+        for year in range(START_YEAR, END_YEAR + 1)
+        if year not in year_counts
+    ]
+
+    print("\nYears with no discovered PDFs:", missing)
 
     return results
 
@@ -763,7 +843,7 @@ def sync_neet_papers():
     if not records:
         return {
             "success": False,
-            "message": "No verified question papers found. Database unchanged.",
+            "message": "No verified papers found. Database unchanged.",
             "discovered": 0,
             "inserted_or_updated": 0,
         }
@@ -833,14 +913,20 @@ def sync_neet_papers():
         connection.commit()
 
         official_count = sum(
-            record["source_type"] == "official"
-            for record in records
+            r["source_type"] == "official"
+            for r in records
         )
 
         third_party_count = sum(
-            record["source_type"] == "third_party"
-            for record in records
+            r["source_type"] == "third_party"
+            for r in records
         )
+
+        year_counts = {}
+
+        for record in records:
+            year = record["year"]
+            year_counts[year] = year_counts.get(year, 0) + 1
 
         return {
             "success": True,
@@ -848,6 +934,7 @@ def sync_neet_papers():
             "inserted_or_updated": len(records),
             "official_records": official_count,
             "third_party_records": third_party_count,
+            "year_wise_counts": year_counts,
             "message": "NEET paper sync completed.",
         }
 
