@@ -307,7 +307,6 @@ def make_record(
 # =========================================================
 # OFFICIAL ARCHIVE DISCOVERY: 2007–2025
 # =========================================================
-
 def discover_official_papers():
 
     soup = fetch_soup(ARCHIVE_URL)
@@ -318,14 +317,15 @@ def discover_official_papers():
     records = []
     seen = set()
 
+    pdf_pattern = re.compile(
+        r"(?P<year>20\d{2})[_-]"
+        r"(?P<paper>[12])"
+        r"(?:[_-](?P<language>English|Hindi))?"
+        r"\.pdf$",
+        re.IGNORECASE
+    )
+
     for anchor in soup.find_all("a", href=True):
-
-        text = anchor.get_text(" ", strip=True)
-
-        context = anchor.parent.get_text(
-            " ",
-            strip=True
-        )
 
         href = urljoin(
             ARCHIVE_URL,
@@ -335,31 +335,28 @@ def discover_official_papers():
         if not is_official_url(href):
             continue
 
-        combined = f"{text} {context} {href}"
+        filename = urlparse(href).path.rsplit(
+            "/",
+            1
+        )[-1]
 
-        if is_excluded(combined):
+        match = pdf_pattern.fullmatch(filename)
+
+        if not match:
             continue
 
-        if not urlparse(href).path.lower().endswith(".pdf"):
+        year = int(match.group("year"))
+
+        if year < 2007 or year > 2025:
             continue
 
-        year_match = re.search(
-            r"\b(200[7-9]|201\d|202[0-5])\b",
-            combined
-        )
+        paper_number = match.group("paper")
 
-        if not year_match:
-            continue
+        language = (
+            match.group("language") or "English"
+        ).capitalize()
 
-        year = int(year_match.group(1))
-
-        stage = detect_stage(
-            combined,
-            year
-        )
-
-        if stage not in ("Paper 1", "Paper 2"):
-            continue
+        stage = f"Paper {paper_number}"
 
         if href in seen:
             continue
@@ -369,12 +366,14 @@ def discover_official_papers():
         record = make_record(
             year=year,
             stage=stage,
-            language=detect_language(combined),
+            language=language,
             url=href,
             page=ARCHIVE_URL,
             authority="JEE Advanced Official",
             status="official_source_link",
-            organizing_institute=detect_organizing_institute(year)
+            organizing_institute=(
+                ORGANIZING_INSTITUTES.get(year, "")
+            )
         )
 
         if record:
