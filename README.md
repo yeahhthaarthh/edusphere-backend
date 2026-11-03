@@ -34,7 +34,7 @@ pip install -r requirements.txt
 Copy .env.example to .env and configure the values.
 Start the API:
 uvicorn app:app --host 0.0.0.0 --port 8000
-The API will be available at http://localhost:8000. FastAPI's interactive API documentation is normally available at /docs.
+The API will be available at https://edusphere-backend-1-v78v.onrender.com/docs#/. FastAPI's interactive API documentation is normally available at /docs.
 Environment variables
 Variable                            Purpose
 ADMIN_EMAIL                       Initial administrator email
