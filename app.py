@@ -63,16 +63,26 @@ _storage = None
 
 app = FastAPI(title="EduSphere Question Paper Archive API", version="2.0.0")
 
-cors_env = os.getenv(
-    "CORS_ORIGINS",
-    "https://souray.netlify.app,http://localhost:3000,http://127.0.0.1:3000",
+# ---------- CORS Configuration ----------
+
+DEFAULT_CORS_ORIGINS = [
+    "https://714cbf9b-edusphere-frontend.shankaryatharth240.workers.dev",
+    "https://souray.netlify.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+cors_env = os.getenv("CORS_ORIGINS", "").strip()
+
+allowed_origins = (
+    [x.strip() for x in cors_env.split(",") if x.strip()]
+    if cors_env
+    else DEFAULT_CORS_ORIGINS
 )
-allowed_origins = [x.strip() for x in cors_env.split(",") if x.strip()]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
