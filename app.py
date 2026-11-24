@@ -1086,3 +1086,75 @@ def neet_discovery_test():
 @app.post("/api/admin/neet-sync")
 def neet_sync():
     return sync_neet_papers()
+# ==========================================
+# EDUSPHERE - MOCK TEST GENERATOR API
+# ==========================================
+
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class GenerateTestRequest(BaseModel):
+    title: str
+    exam: str
+    subject_id: int
+    question_count: int = Field(default=30, ge=1, le=300)
+    duration_minutes: int = Field(default=60, ge=1)
+    chapter_id: Optional[int] = None
+    topic_id: Optional[int] = None
+    difficulty: str = "mixed"
+    question_type: str = "mixed"
+
+
+@app.post("/api/admin/tests/generate")
+def generate_practice_test(data: GenerateTestRequest, request: Request):
+
+    require_admin(request)
+
+    allowed_difficulties = ["mixed", "easy", "medium", "hard"]
+    allowed_types = [
+        "mixed",
+        "single_correct",
+        "multiple_correct",
+        "numerical",
+        "assertion_reason",
+        "match",
+        "subjective"
+    ]
+
+    if data.difficulty not in allowed_difficulties:
+        raise HTTPException(status_code=400, detail="Invalid difficulty")
+
+    if data.question_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Invalid question type")
+
+    try:
+        with connect() as db:
+            result = db.execute(
+                """
+                SELECT create_practice_test(
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                ) AS test_id
+                """,
+                (
+                    data.title,
+                    data.exam,
+                    data.subject_id,
+                    data.question_count,
+                    data.duration_minutes,
+                    data.chapter_id,
+                    data.topic_id,
+                    data.difficulty,
+                    data.question_type
+                )
+            ).fetchone()
+
+        return {
+            "success": True,
+            "message": "Practice test generated",
+            "test_id": result["test_id"]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+        
