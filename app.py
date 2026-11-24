@@ -1099,7 +1099,7 @@ class GenerateTestRequest(BaseModel):
     exam: str
     subject_id: int
     question_count: int = Field(default=30, ge=1, le=300)
-    duration_minutes: int = Field(default=60, ge=1)
+    duration_minutes: int = Field(default=60, ge=1, le=600)
     chapter_id: Optional[int] = None
     topic_id: Optional[int] = None
     difficulty: str = "mixed"
@@ -1107,11 +1107,16 @@ class GenerateTestRequest(BaseModel):
 
 
 @app.post("/api/admin/tests/generate")
-def generate_practice_test(data: GenerateTestRequest, request: Request):
-
+def generate_practice_test(
+    data: GenerateTestRequest,
+    request: Request
+):
     require_admin(request)
 
-    allowed_difficulties = ["mixed", "easy", "medium", "hard"]
+    allowed_difficulties = [
+        "mixed", "easy", "medium", "hard"
+    ]
+
     allowed_types = [
         "mixed",
         "single_correct",
@@ -1123,17 +1128,17 @@ def generate_practice_test(data: GenerateTestRequest, request: Request):
     ]
 
     if data.difficulty not in allowed_difficulties:
-        raise HTTPException(status_code=400, detail="Invalid difficulty")
+        raise HTTPException(400, "Invalid difficulty")
 
     if data.question_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Invalid question type")
+        raise HTTPException(400, "Invalid question type")
 
     try:
         with connect() as db:
             result = db.execute(
                 """
                 SELECT create_practice_test(
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s
                 ) AS test_id
                 """,
                 (
@@ -1144,8 +1149,7 @@ def generate_practice_test(data: GenerateTestRequest, request: Request):
                     data.duration_minutes,
                     data.chapter_id,
                     data.topic_id,
-                    data.difficulty,
-                    data.question_type
+                    data.difficulty
                 )
             ).fetchone()
 
@@ -1156,5 +1160,7 @@ def generate_practice_test(data: GenerateTestRequest, request: Request):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-        
+        raise HTTPException(
+            status_code=400,
+            detail=f"Test generation failed: {str(e)[:300]}"
+        )
